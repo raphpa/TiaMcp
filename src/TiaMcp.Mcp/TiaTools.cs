@@ -68,7 +68,7 @@ public sealed partial class TiaTools
     });
 
     [McpServerTool(Name = "save_project_as")]
-    [Description("Save the currently connected project to a new folder, like TIA Portal's own 'Save project as' - creates a copy at the target location and continues working on that copy. Not supported for Multiuser local sessions.")]
+    [Description("Save the currently connected project to a new folder, like TIA Portal's own 'Save project as' - creates a copy at the target location and continues working on that copy. Use this before risky changes if you want an on-disk checkpoint distinct from the original project. Not supported for Multiuser local sessions.")]
     public Task<string> SaveProjectAs(
         [Description("Target directory for the new project copy. Must not already contain a project.")] string targetDirectory) => Safe(async () =>
     {
