@@ -54,7 +54,7 @@ public sealed partial class TiaTools
         {
             var list = read.Lists.FirstOrDefault(l => l.Name == name);
             items.Add(FromCsv(plc, AlarmTextListKind, "", name,
-                list == null ? null : FormatAlarmTextList(list),
+                list == null ? null : AlarmTextListCsv.Format(list),
                 read.Error ?? (list == null ? "not in the text list export" : null)));
         }
     }
@@ -70,39 +70,6 @@ public sealed partial class TiaTools
             if (graphicLists > 0)
                 _exportNotes.Add($"SKIPPED {graphicLists} graphic list(s) of '{hmi}' - exporting a classic graphic list crashes TIA Portal V21 (InvalidCastException in UpdateOpenLinks)");
         }
-    }
-
-    // One CSV per user text list: From, To and one text column per project language.
-    private static string FormatAlarmTextList(PlcAlarmTextList list) =>
-        FormatCsv(new[] { "From", "To" }.Concat(list.Languages.Select(l => $"Text [{l}]")).ToArray(),
-            list.Entries.Select(e => new[] { e.From, e.To }.Concat(e.Texts).ToArray()));
-
-    private static PlcAlarmTextList ParseAlarmTextListCsv(string name, string csv)
-    {
-        var rows = ParseCsvRows(csv);
-        if (rows.Count == 0) throw new FormatException("empty file");
-        var header = rows[0];
-        int cFrom = header.IndexOf("From"), cTo = header.IndexOf("To");
-        if (cFrom < 0) throw new FormatException("column 'From' missing");
-        var languageColumns = header.Select((h, i) => (h, i)).Where(x => x.h.StartsWith("Text [") && x.h.EndsWith("]")).ToList();
-        if (languageColumns.Count == 0) throw new FormatException("no 'Text [xx-XX]' column");
-
-        var entries = new List<PlcAlarmTextEntry>();
-        for (var r = 1; r < rows.Count; r++)
-        {
-            var row = rows[r];
-            string Cell(int i) => i >= 0 && i < row.Count ? row[i] : "";
-            var from = Cell(cFrom).Trim();
-            if (from.Length == 0) continue;
-            if (!long.TryParse(from, out _)) throw new FormatException($"line {r + 1}: From '{from}' is not a number");
-            var to = Cell(cTo).Trim();
-            if (to.Length == 0) to = from;
-            if (!long.TryParse(to, out _)) throw new FormatException($"line {r + 1}: To '{to}' is not a number");
-            entries.Add(new PlcAlarmTextEntry(from, to, languageColumns.Select(c => Cell(c.i)).ToList()));
-        }
-        var duplicate = entries.GroupBy(e => $"{e.From}|{e.To}").FirstOrDefault(g => g.Count() > 1);
-        if (duplicate != null) throw new FormatException($"entry {duplicate.First().From} appears {duplicate.Count()} times");
-        return new PlcAlarmTextList(name, languageColumns.Select(c => c.h.Substring(6, c.h.Length - 7)).ToList(), entries);
     }
 
     private async Task<(List<string> Created, List<string> Updated, List<string> Skipped, List<string> Failed)> ImportAlarmTextLists(
@@ -127,7 +94,7 @@ public sealed partial class TiaTools
                 continue;
             }
             if (!overwriteExisting) { skipped.Add($"{label} - already exists, overwriteExisting=false"); continue; }
-            try { lists.Add((item, ParseAlarmTextListCsv(item.ItemName, File.ReadAllText(file)))); }
+            try { lists.Add((item, AlarmTextListCsv.Parse(item.ItemName, File.ReadAllText(file)))); }
             catch (FormatException ex) { failed.Add($"{label}: {ex.Message}"); }
         }
         if (lists.Count == 0) return (created, updated, skipped, failed);

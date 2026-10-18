@@ -1134,7 +1134,7 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
             if (!File.Exists(file)) { failed.Add($"tag table '{label}': no .csv file found at {file}"); continue; }
 
             TagSpec[] tags;
-            try { tags = ParseTagCsv(File.ReadAllText(file)); }
+            try { tags = TagTableCsv.Parse(File.ReadAllText(file)); }
             catch (FormatException ex) { failed.Add($"tag table '{label}': {ex.Message}"); continue; }
 
             var exists = existingTables.Contains(item.ItemName);
@@ -1184,7 +1184,7 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
             if (!File.Exists(file)) { failed.Add($"HMI tag table '{label}': no .csv file found at {file}"); continue; }
 
             HmiTagSpec[] tags;
-            try { tags = ParseHmiTagCsv(File.ReadAllText(file)); }
+            try { tags = HmiTagTableCsv.Parse(File.ReadAllText(file)); }
             catch (FormatException ex) { failed.Add($"HMI tag table '{label}': {ex.Message}"); continue; }
 
             var exists = existingTables.Contains(item.ItemName);
@@ -1240,21 +1240,23 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
             var itemName = item.Kind.Substring("HMI ".Length); // "DiscreteAlarms" / "AnalogAlarms" / "AlarmClasses"
             var file = Path.Combine(dir, itemName + ".csv");
             if (!File.Exists(file)) { failed.Add($"HMI {itemName}: no .csv file found at {file}"); continue; }
-            var rows = ParseCsv(File.ReadAllText(file));
 
             if (itemName == "AlarmClasses")
             {
+                HmiAlarmClassSpec[] classes;
+                try { classes = HmiAlarmsCsv.ParseClasses(File.ReadAllText(file)); }
+                catch (FormatException ex) { failed.Add($"HMI {itemName}: {ex.Message}"); continue; }
+
                 var existing = (await _session.ListHmiAlarmClassesAsync(hmiName)).Select(c => c.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
-                foreach (var row in rows)
+                foreach (var spec in classes)
                 {
-                    var name = row["Name"];
+                    var name = spec.Name;
                     var exists = existing.Contains(name);
                     if (exists && !overwriteExisting) { skipped.Add($"HMI alarm class '{name}' - already exists, overwriteExisting=false"); continue; }
                     if (!exists && !createMissing) { skipped.Add($"HMI alarm class '{name}' - does not exist, createMissing=false"); continue; }
                     if (dryRun) { (exists ? updated : created).Add($"HMI alarm class '{name}' (dry run)"); continue; }
 
-                    var priority = int.TryParse(GetField(row, "Priority"), out var p) ? (int?)p : null;
-                    var result = await _session.WriteHmiAlarmClassAsync(hmiName, new HmiAlarmClassSpec(name, priority, NullIfEmpty(GetField(row, "Log"))));
+                    var result = await _session.WriteHmiAlarmClassAsync(hmiName, spec);
                     if (result.Success) (exists ? updated : created).Add($"HMI alarm class '{name}'");
                     else failed.Add($"HMI alarm class '{name}': {result.Error}");
                 }
@@ -1263,24 +1265,19 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
             }
 
             var type = itemName == "DiscreteAlarms" ? "Discrete" : "Analog";
+            HmiAlarmSpec[] alarms;
+            try { alarms = HmiAlarmsCsv.ParseAlarms(File.ReadAllText(file), type); }
+            catch (FormatException ex) { failed.Add($"HMI {itemName}: {ex.Message}"); continue; }
+
             var existingAlarms = (await _session.ListHmiAlarmsAsync(hmiName, type)).Select(a => a.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            foreach (var row in rows)
+            foreach (var spec in alarms)
             {
-                var name = row["Name"];
+                var name = spec.Name;
                 var exists = existingAlarms.Contains(name);
                 if (exists && !overwriteExisting) { skipped.Add($"HMI alarm '{name}' - already exists, overwriteExisting=false"); continue; }
                 if (!exists && !createMissing) { skipped.Add($"HMI alarm '{name}' - does not exist, createMissing=false"); continue; }
                 if (dryRun) { (exists ? updated : created).Add($"HMI alarm '{name}' (dry run)"); continue; }
 
-                // TriggerAddress is a read-only computed field (see write_source_tree) - it's
-                // exported for readability but never written back; RaisedStateTag is what
-                // actually (re)binds the trigger and recomputes it.
-                var spec = new HmiAlarmSpec(
-                    type, name,
-                    NullIfEmpty(GetField(row, "AlarmClass")), NullIfEmpty(GetField(row, "EventText")), NullIfEmpty(GetField(row, "InfoText")),
-                    null,
-                    NullIfEmpty(GetField(row, "Condition")), NullIfEmpty(GetField(row, "ConditionValue")), NullIfEmpty(GetField(row, "RaisedStateTag")),
-                    NullIfEmpty(GetField(row, "AuditClass")), NullIfEmpty(GetField(row, "Area")), NullIfEmpty(GetField(row, "Origin")));
                 var result = await _session.WriteHmiAlarmAsync(hmiName, spec);
                 if (result.Success) (exists ? updated : created).Add($"HMI alarm '{name}'");
                 else failed.Add($"HMI alarm '{name}': {result.Error}");
@@ -1395,71 +1392,6 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
         "Expected lines as list_project or _export_summary.txt show them, under their software's header, e.g.:\n" +
         "=== PLC_1 ===\n  block 'Group/Main'\n  OK     udt 'Types/UDT_Motor'\n=== HMI_1 (HMI) ===\n  HMI tag table 'Tags'\n  HMI DiscreteAlarms";
 
-    // Reverse of FormatCsv/CsvField: RFC 4180 quoting, CRLF or LF line endings, header row used as
-    // each returned row's keys.
-    private static List<Dictionary<string, string>> ParseCsv(string text)
-    {
-        var rows = ParseCsvRows(text);
-        if (rows.Count == 0) return new List<Dictionary<string, string>>();
-
-        var headers = rows[0];
-        var result = new List<Dictionary<string, string>>();
-        for (var i = 1; i < rows.Count; i++)
-        {
-            var row = rows[i];
-            var dict = new Dictionary<string, string>();
-            for (var c = 0; c < headers.Count; c++)
-                dict[headers[c]] = c < row.Count ? row[c] : "";
-            result.Add(dict);
-        }
-        return result;
-    }
-
-    private static List<List<string>> ParseCsvRows(string text)
-    {
-        var rows = new List<List<string>>();
-        var row = new List<string>();
-        var field = new StringBuilder();
-        var inQuotes = false;
-        var i = 0;
-        while (i < text.Length)
-        {
-            var c = text[i];
-            if (inQuotes)
-            {
-                if (c == '"')
-                {
-                    if (i + 1 < text.Length && text[i + 1] == '"') { field.Append('"'); i += 2; continue; }
-                    inQuotes = false; i++; continue;
-                }
-                field.Append(c); i++; continue;
-            }
-
-            switch (c)
-            {
-                case '"': inQuotes = true; i++; continue;
-                case ',': row.Add(field.ToString()); field.Clear(); i++; continue;
-                case '\r': i++; continue;
-                case '\n':
-                    row.Add(field.ToString()); field.Clear();
-                    rows.Add(row); row = new List<string>();
-                    i++; continue;
-                default: field.Append(c); i++; continue;
-            }
-        }
-        if (field.Length > 0 || row.Count > 0)
-        {
-            row.Add(field.ToString());
-            rows.Add(row);
-        }
-        return rows.Where(r => r.Count > 1 || r[0].Length > 0).ToList();
-    }
-
-    private static string? NullIfEmpty(string? s) => string.IsNullOrEmpty(s) ? null : s;
-
-    // net48's Dictionary<TKey, TValue> has no GetValueOrDefault.
-    private static string? GetField(Dictionary<string, string> row, string key) => row.TryGetValue(key, out var v) ? v : null;
-
     // One item as exported from TIA Portal: its files (root-relative path, content, whether it is
     // written with a UTF-8 BOM), or why it couldn't be exported. HMI alarms are three fixed items
     // per HMI with Kind 'HMI DiscreteAlarms'/'HMI AnalogAlarms'/'HMI AlarmClasses' and no name -
@@ -1498,7 +1430,7 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
             foreach (var (b, result) in await _session.ReadAllBlocksAsync(plc, (g, n) => Includes(plc, "block", g, n)))
                 items.Add(FromDocuments(plc, "block", b.GroupPath, b.Name, result));
             foreach (var (t, result) in await _session.ReadAllTagTablesAsync(plc, (g, n) => Includes(plc, "tag table", g, n)))
-                items.Add(FromCsv(plc, "tag table", t.GroupPath, t.Name, result.Success ? FormatTagTable(result.Tags) : null, result.Error));
+                items.Add(FromCsv(plc, "tag table", t.GroupPath, t.Name, result.Success ? TagTableCsv.Format(result.Tags) : null, result.Error));
             foreach (var (t, result) in await _session.ReadAllUdtsAsync(plc, (g, n) => Includes(plc, "udt", g, n)))
                 items.Add(FromDocuments(plc, "udt", t.GroupPath, t.Name, result));
             await ExportPlcAlarmTextLists(plc, Includes, items);
@@ -1512,7 +1444,7 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
                 try
                 {
                     var result = await _session.ReadHmiTagTableAsync(hmi, table.Name);
-                    items.Add(FromCsv(hmi, "HMI tag table", table.GroupPath, table.Name, result.Success ? FormatHmiTagTable(result.Tags) : null, result.Error));
+                    items.Add(FromCsv(hmi, "HMI tag table", table.GroupPath, table.Name, result.Success ? HmiTagTableCsv.Format(result.Tags) : null, result.Error));
                 }
                 catch (Exception ex)
                 {
@@ -1525,8 +1457,8 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
                 try
                 {
                     var csv = kind == "HMI AlarmClasses"
-                        ? FormatHmiAlarmClasses(await _session.ListHmiAlarmClassesAsync(hmi))
-                        : FormatHmiAlarms(await _session.ListHmiAlarmsAsync(hmi, kind == "HMI DiscreteAlarms" ? "Discrete" : "Analog"));
+                        ? HmiAlarmsCsv.FormatClasses(await _session.ListHmiAlarmClassesAsync(hmi))
+                        : HmiAlarmsCsv.FormatAlarms(await _session.ListHmiAlarmsAsync(hmi, kind == "HMI DiscreteAlarms" ? "Discrete" : "Analog"));
                     items.Add(FromCsv(hmi, kind, "", "", csv, null));
                 }
                 catch (Exception ex)
@@ -1712,107 +1644,6 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
     }
 
     private static readonly Regex ListedItem = new(@"^(?:(?<status>OK|FAILED|STALE)\s+)?(?:(?<kind>HMI (?:DiscreteAlarms|AnalogAlarms|AlarmClasses))\b|(?<kind>block|udt|tag table|alarm text list|HMI tag table|HMI screen template|HMI pop-up screen|HMI screen|HMI text list) '(?<label>[^']*)')", RegexOptions.Compiled);
-
-    private static string FormatHmiAlarms(IReadOnlyList<HmiAlarmInfo> alarms) =>
-        FormatCsv(
-            new[] { "Type", "Name", "AlarmClass", "EventText", "InfoText", "TriggerAddress", "Condition", "ConditionValue", "RaisedStateTag", "AuditClass", "Area", "Origin" },
-            alarms.Select(a => new[]
-            {
-                a.Type, a.Name, a.AlarmClass ?? "", a.EventText ?? "", a.InfoText ?? "", a.TriggerAddress ?? "",
-                a.Condition ?? "", a.ConditionValue ?? "", a.RaisedStateTag ?? "", a.AuditClass ?? "", a.Area ?? "", a.Origin ?? ""
-            }));
-
-    private static string FormatHmiAlarmClasses(IReadOnlyList<HmiAlarmClassInfo> classes) =>
-        FormatCsv(
-            new[] { "Name", "Priority", "Log", "Id", "IsSystem" },
-            classes.Select(c => new[] { c.Name, c.Priority.ToString(), c.Log ?? "", c.Id.ToString(), c.IsSystem.ToString() }));
-
-    // RFC 4180 CSV, CRLF line endings and a header row - what Excel expects when opening a .csv
-    // directly rather than going through its text-import wizard.
-    private static string FormatTagTable(IReadOnlyList<TagInfo> tags) =>
-        FormatCsv(
-            new[] { "Name", "DataType", "LogicalAddress", "Comment", "ExternalAccessible", "ExternalVisible", "ExternalWritable" },
-            tags.Select(t => new[] { t.Name, t.DataType, t.LogicalAddress, t.Comment ?? "",
-                t.ExternalAccessible.ToString(), t.ExternalVisible.ToString(), t.ExternalWritable.ToString() }));
-
-    // Inverse of FormatTagTable. Missing columns and empty cells map to null ("leave unchanged"),
-    // so CSVs from before the flag columns existed still import. Throws FormatException on bad input.
-    private static TagSpec[] ParseTagCsv(string csv)
-    {
-        var rows = ParseCsv(csv);
-        var tags = new List<TagSpec>();
-        for (var i = 0; i < rows.Count; i++)
-        {
-            var r = rows[i];
-            var line = i + 2; // 1-based, after the header row
-            var name = GetField(r, "Name");
-            var dataType = GetField(r, "DataType");
-            if (string.IsNullOrEmpty(name) && string.IsNullOrEmpty(dataType)) continue; // blank line
-            if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(dataType))
-                throw new FormatException($"CSV line {line}: Name and DataType are required.");
-
-            tags.Add(new TagSpec(name!, dataType!,
-                NullIfEmpty(GetField(r, "LogicalAddress")), NullIfEmpty(GetField(r, "Comment")),
-                ParseCsvBool(r, "ExternalAccessible", line), ParseCsvBool(r, "ExternalVisible", line), ParseCsvBool(r, "ExternalWritable", line)));
-        }
-        return tags.ToArray();
-    }
-
-    private static bool? ParseCsvBool(Dictionary<string, string> row, string column, int line)
-    {
-        var value = GetField(row, column)?.Trim();
-        if (string.IsNullOrEmpty(value)) return null;
-        if (value == "1" || value!.Equals("true", StringComparison.OrdinalIgnoreCase)) return true;
-        if (value == "0" || value.Equals("false", StringComparison.OrdinalIgnoreCase)) return false;
-        throw new FormatException($"CSV line {line}: {column} must be True/False/1/0, got '{value}'.");
-    }
-
-    private static string FormatHmiTagTable(IReadOnlyList<HmiTagInfo> tags) =>
-        FormatCsv(
-            new[] { "Name", "DataType", "Address", "Connection", "PlcName", "PlcTag", "Comment", "AcquisitionCycle" },
-            tags.Select(t => new[] { t.Name, t.DataType, t.Address ?? "", t.Connection ?? "", t.PlcName ?? "", t.PlcTag ?? "", t.Comment ?? "", t.AcquisitionCycle ?? "" }));
-
-    // Inverse of FormatHmiTagTable, same rules as ParseTagCsv.
-    private static HmiTagSpec[] ParseHmiTagCsv(string csv)
-    {
-        var rows = ParseCsv(csv);
-        var tags = new List<HmiTagSpec>();
-        for (var i = 0; i < rows.Count; i++)
-        {
-            var r = rows[i];
-            var line = i + 2; // 1-based, after the header row
-            var name = GetField(r, "Name");
-            var dataType = GetField(r, "DataType");
-            if (string.IsNullOrEmpty(name) && string.IsNullOrEmpty(dataType)) continue; // blank line
-            if (string.IsNullOrEmpty(name) || string.IsNullOrEmpty(dataType))
-                throw new FormatException($"CSV line {line}: Name and DataType are required.");
-
-            tags.Add(new HmiTagSpec(name!, dataType!,
-                NullIfEmpty(GetField(r, "Address")), NullIfEmpty(GetField(r, "Connection")),
-                NullIfEmpty(GetField(r, "PlcName")), NullIfEmpty(GetField(r, "PlcTag")), NullIfEmpty(GetField(r, "Comment")),
-                NullIfEmpty(GetField(r, "AcquisitionCycle"))));
-        }
-        return tags.ToArray();
-    }
-
-    private static string FormatCsv(string[] headers, IEnumerable<string[]> rows)
-    {
-        var sb = new StringBuilder();
-        sb.Append(string.Join(",", headers.Select(CsvField))).Append("\r\n");
-        foreach (var row in rows)
-        {
-            sb.Append(string.Join(",", row.Select(CsvField))).Append("\r\n");
-        }
-        return sb.ToString();
-    }
-
-    private static string CsvField(string? value)
-    {
-        value ??= "";
-        return value.IndexOfAny(new[] { ',', '"', '\n', '\r' }) >= 0
-            ? "\"" + value.Replace("\"", "\"\"") + "\""
-            : value;
-    }
 
     private static string GroupDir(string plcDir, string sectionName, string groupPath)
     {

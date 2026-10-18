@@ -11,7 +11,7 @@ The MCP server runs straight from the build output (`src\TiaMcp.Host\bin\Debug\n
 2. `dotnet build TiaMcp.sln`
 3. Restart the TiaMcp MCP server in your client (Claude Code: `/mcp`), then call `tia_connect` again.
 
-There are no automated tests yet: verify changes against a live TIA Portal project.
+`dotnet test TiaMcp.sln` runs the converter unit tests, without TIA Portal. To also round-trip real GRAPH exports, set `TIAMCP_GRAPH_SAMPLES` to a folder outside the repo holding raw GRAPH `.xml` exports. Everything that talks to Openness still has to be verified against a live TIA Portal project.
 
 # Documentation
 After code changes, update README.md and STATUS.md where a new user needs to know. Keep them complete but compact: not every code change, only what a new user needs.

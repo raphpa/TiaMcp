@@ -41,7 +41,7 @@ All source is read and written as files in a [source tree](#source-tree) on disk
 dotnet build TiaMcp.sln
 ```
 
-Produces `src\TiaMcp.Host\bin\Debug\net48\TiaMcp.Host.exe`, the MCP stdio server entry point.
+Produces `src\TiaMcp.Host\bin\Debug\net48\TiaMcp.Host.exe`, the MCP stdio server entry point. `dotnet test TiaMcp.sln` runs the unit tests (no TIA Portal needed).
 
 ## Registering with Claude Code
 

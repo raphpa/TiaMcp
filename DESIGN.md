@@ -24,18 +24,23 @@ TiaMcp makes a TIA Portal project workable for an LLM by mirroring it as a **sou
 
 | Project | Role |
 |---|---|
+| `TiaMcp.Formats` | File format converters (CSV, GRAPH DSL) and the records they convert. No Openness or MCP dependency. |
 | `TiaMcp.Openness` | All Openness API calls, run on one STA thread (`StaDispatcher`). No MCP code. |
 | `TiaMcp.Mcp` | MCP tools, the source tree and the manifest. `TiaSession` is the only path into Openness. |
 | `TiaMcp.Host` | stdio entry point, Openness assembly resolving. |
+| `tests/TiaMcp.Tests` | Unit tests for `TiaMcp.Formats`. They run without TIA Portal. Samples are made up; real exports stay outside the repo. |
+
+A converter is pure: text in, records or text out. Every converter has round-trip tests (`parse(format(x)) == x`, unedited write is a no-op) and tests that bad input gives a `FormatException` with the line, not a crash.
 
 ## Adding an object type (today)
 
 Touch, in this order:
-1. `TiaConnection.<Area>.cs`: list, export and import.
-2. `TiaSession`: an async wrapper for each new call.
-3. `TiaTools`: the kind name in `ListedItem`, `SectionOf` and `KindOrder`; export in `ExportItems`; import at the right place in the dependency order in `WriteSourceTree`; new-file detection in `NewItemsInTree`; the item lines in `list_project`.
-4. Lifecycle tools, if Openness supports them.
-5. README (format table) and STATUS (object table).
+1. `TiaMcp.Formats`: the converter and its records, with tests in `tests/TiaMcp.Tests` (not needed for native Openness XML).
+2. `TiaConnection.<Area>.cs`: list, export and import.
+3. `TiaSession`: an async wrapper for each new call.
+4. `TiaTools`: the kind name in `ListedItem`, `SectionOf` and `KindOrder`; export in `ExportItems`; import at the right place in the dependency order in `WriteSourceTree`; new-file detection in `NewItemsInTree`; the item lines in `list_project`.
+5. Lifecycle tools, if Openness supports them.
+6. README (format table) and STATUS (object table).
 
 ## Future (target design, not implemented)
 
@@ -44,7 +49,6 @@ Touch, in this order:
   - `list_project` and `_export_summary.txt` show the available formats on each item line, e.g. `tag table 'Motors' [csv, xml]`. Passing such a line to `read_source_tree` reads those formats, and several may be read at once.
   - A write accepts only **one edited format per item**: the extension decides the import route, and an item with more than one edited format is refused. The read-back refreshes every format in the tree.
 - **Manifest v2.** The manifest gets a `"version": 2` field. Each item gets `"formats": ["csv", "xml"]`. Each file becomes an object instead of a bare hash, `{ "hash": "...", "format": "csv" }`, so that later fields (multiuser state, timestamps) can be added without another schema change. The v1 manifest (path → hash) stays readable.
-- **Converters are pure and tested.** All format converters (CSV, JSON, GRAPH DSL) live in one place without an Openness dependency, with round-trip unit tests that run without TIA Portal.
 - **Smaller files.** `TiaConnection` and `TiaTools` are split per kind instead of having a few large files.
 - **`TiaSession.Run(c => c.X())`** replaces the one-line async wrappers.
 - **Generic lifecycle tools** (`rename_item`, `delete_item` with a kind parameter) replace the per-kind rename/delete/group tools, once the kind handlers exist.
