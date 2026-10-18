@@ -859,6 +859,20 @@ public sealed partial class TiaConnection : IDisposable
             }
             catch { /* best effort - leave the plain relayed .s7dcl/.s7res as they were */ }
 
+            // The relay block is a fresh import on every read, so TIA Portal gives its texts new ids
+            // each time; renumber them so an unchanged block reads back identically (otherwise
+            // write_source_tree sees it as changed in TIA Portal since the read).
+            {
+                var dclIndex = docs.FindIndex(d => d.FileName.EndsWith(".s7dcl", StringComparison.OrdinalIgnoreCase));
+                if (dclIndex >= 0)
+                {
+                    var resIndex = docs.FindIndex(d => d.FileName.EndsWith(".s7res", StringComparison.OrdinalIgnoreCase));
+                    var (dcl, res) = MlcIds.Renumber(docs[dclIndex].Content, resIndex >= 0 ? docs[resIndex].Content : null);
+                    docs[dclIndex] = docs[dclIndex] with { Content = dcl };
+                    if (resIndex >= 0) docs[resIndex] = docs[resIndex] with { Content = res! };
+                }
+            }
+
             // Each network's title/comment now also lives in .s7dcl/.s7res (above, best effort) so it
             // reads consistently across the whole block; only the STL instructions themselves - which
             // .s7dcl has no notation for - live in the sidecar below, as either real AWL text (tried
