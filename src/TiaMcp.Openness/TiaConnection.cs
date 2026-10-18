@@ -409,7 +409,7 @@ public sealed partial class TiaConnection : IDisposable
             string? exportError = null;
             try
             {
-                result = block.ExportAsDocuments(outDir, block.Name);
+                result = block.ExportAsDocuments(outDir, FileStem(block.Name));
                 if (result.State == DocumentResultState.Failure)
                 {
                     exportError = string.Join("; ", result.Messages.Select(m => m.Message));
@@ -493,7 +493,7 @@ public sealed partial class TiaConnection : IDisposable
         outDir.Create();
         try
         {
-            var xmlFile = new FileInfo(Path.Combine(outDir.FullName, block.Name + ".xml"));
+            var xmlFile = new FileInfo(Path.Combine(outDir.FullName, FileStem(block.Name) + ".xml"));
             block.Export(xmlFile, ExportOptions.WithDefaults);
             var xdoc = XDocument.Load(xmlFile.FullName);
             var compileUnits = xdoc.Descendants("SW.Blocks.CompileUnit").ToList();
@@ -544,7 +544,7 @@ public sealed partial class TiaConnection : IDisposable
         outDir.Create();
         try
         {
-            var outFile = new FileInfo(Path.Combine(outDir.FullName, block.Name + ".xml"));
+            var outFile = new FileInfo(Path.Combine(outDir.FullName, FileStem(block.Name) + ".xml"));
             try
             {
                 block.Export(outFile, ExportOptions.WithDefaults);
@@ -604,7 +604,7 @@ public sealed partial class TiaConnection : IDisposable
         outDir.Create();
         try
         {
-            var outFile = new FileInfo(Path.Combine(outDir.FullName, block.Name + ".awl"));
+            var outFile = new FileInfo(Path.Combine(outDir.FullName, FileStem(block.Name) + ".awl"));
             try
             {
                 software.ExternalSourceGroup.GenerateSource(new IGenerateSource[] { block }, outFile);
@@ -642,7 +642,7 @@ public sealed partial class TiaConnection : IDisposable
         PlcBlockUserGroup? relayGroup = null;
         try
         {
-            var xmlFile = new FileInfo(Path.Combine(outDir.FullName, block.Name + ".xml"));
+            var xmlFile = new FileInfo(Path.Combine(outDir.FullName, FileStem(block.Name) + ".xml"));
             try
             {
                 block.Export(xmlFile, ExportOptions.WithDefaults);
@@ -1229,7 +1229,7 @@ public sealed partial class TiaConnection : IDisposable
             string? exportError = null;
             try
             {
-                result = type.ExportAsDocuments(outDir, type.Name);
+                result = type.ExportAsDocuments(outDir, FileStem(type.Name));
                 if (result.State == DocumentResultState.Failure)
                 {
                     exportError = string.Join("; ", result.Messages.Select(m => m.Message));
@@ -1309,7 +1309,7 @@ public sealed partial class TiaConnection : IDisposable
         probeDir.Create();
         try
         {
-            var result = block.ExportAsDocuments(probeDir, block.Name);
+            var result = block.ExportAsDocuments(probeDir, FileStem(block.Name));
             return result.State == DocumentResultState.Failure
                 && result.Messages.Any(m => m.Message.Contains("cannot be exported to or imported from SIMATIC SD"));
         }
@@ -1363,7 +1363,7 @@ public sealed partial class TiaConnection : IDisposable
                 return new ImportResult(false, new[] { ex.Message });
             }
 
-            var importFile = new FileInfo(Path.Combine(outDir.FullName, block.Name + ".xml"));
+            var importFile = new FileInfo(Path.Combine(outDir.FullName, FileStem(block.Name) + ".xml"));
             File.WriteAllText(importFile.FullName, newXml);
 
             try
@@ -1430,7 +1430,7 @@ public sealed partial class TiaConnection : IDisposable
         outDir.Create();
         try
         {
-            var sourceFile = new FileInfo(Path.Combine(outDir.FullName, blockName + ".awl"));
+            var sourceFile = new FileInfo(Path.Combine(outDir.FullName, FileStem(blockName) + ".awl"));
             File.WriteAllText(sourceFile.FullName, documents[0].Content);
 
             var externalSourceName = "TiaMcpStlWrite_" + Guid.NewGuid().ToString("N");
@@ -1641,6 +1641,16 @@ public sealed partial class TiaConnection : IDisposable
         return new ImportResult(reshapeResult.Success, messages);
     }
 
+    // A block or UDT name may hold characters a file name can't (e.g. '/'), but Openness's
+    // ExportAsDocuments/ImportFromDocuments take it as the file name - same replacement as the
+    // source tree's file names. The name inside the .s7dcl stays the real one.
+    private static string FileStem(string name)
+    {
+        foreach (var c in Path.GetInvalidFileNameChars())
+            name = name.Replace(c, '_');
+        return name;
+    }
+
     private ImportResult ImportBlockDocuments(PlcBlockComposition target, string blockName, IReadOnlyList<BlockDocument> documents, ImportDocumentOptions options)
     {
         var resFile = documents.FirstOrDefault(d => d.FileName.EndsWith(".s7res", StringComparison.OrdinalIgnoreCase));
@@ -1665,10 +1675,10 @@ public sealed partial class TiaConnection : IDisposable
         {
             foreach (var doc in documents)
             {
-                File.WriteAllText(Path.Combine(dir.FullName, doc.FileName), doc.Content);
+                File.WriteAllText(Path.Combine(dir.FullName, FileStem(doc.FileName)), doc.Content);
             }
 
-            var result = target.ImportFromDocuments(dir, blockName, options);
+            var result = target.ImportFromDocuments(dir, FileStem(blockName), options);
             var messages = result.Messages.Select(m => m.Message).ToArray();
             return new ImportResult(result.State != DocumentResultState.Failure, messages);
         }
@@ -1774,10 +1784,10 @@ public sealed partial class TiaConnection : IDisposable
         {
             foreach (var doc in documents)
             {
-                File.WriteAllText(Path.Combine(dir.FullName, doc.FileName), doc.Content);
+                File.WriteAllText(Path.Combine(dir.FullName, FileStem(doc.FileName)), doc.Content);
             }
 
-            var result = target.ImportFromDocuments(dir, typeName, options);
+            var result = target.ImportFromDocuments(dir, FileStem(typeName), options);
             // TIA Portal adds "succeeded with comments ignored if any" to every UDT import, also when
             // there are no comments or they all came in through S7_MLC/.s7res - it is about '//' comments.
             var messages = result.Messages
@@ -3168,15 +3178,23 @@ public sealed partial class TiaConnection : IDisposable
     // group-path-qualified form here too - not just the bare name - by matching on the last path
     // segment, so a name round-tripped straight from list_blocks' output works without the
     // caller having to strip the path themselves.
+    // name is the block name or 'group/path/Name'. A block name can hold a '/' itself
+    // ("Pump 1/2"), so the whole name is tried before the part after the last '/'.
     private static (PlcBlock block, PlcBlockComposition owner)? FindBlockByName(PlcBlockComposition blocks, PlcBlockUserGroupComposition groups, string name)
     {
-        var bareName = name.Substring(name.LastIndexOf('/') + 1);
-        var direct = blocks.OfType<PlcBlock>().FirstOrDefault(b => b.Name == bareName);
+        var slash = name.LastIndexOf('/');
+        return FindBlockByExactName(blocks, groups, name)
+            ?? (slash >= 0 ? FindBlockByExactName(blocks, groups, name.Substring(slash + 1)) : null);
+    }
+
+    private static (PlcBlock block, PlcBlockComposition owner)? FindBlockByExactName(PlcBlockComposition blocks, PlcBlockUserGroupComposition groups, string name)
+    {
+        var direct = blocks.OfType<PlcBlock>().FirstOrDefault(b => b.Name == name);
         if (direct != null) return (direct, blocks);
 
         foreach (var group in groups)
         {
-            var found = FindBlockByName(group.Blocks, group.Groups, name);
+            var found = FindBlockByExactName(group.Blocks, group.Groups, name);
             if (found != null) return found;
         }
 
