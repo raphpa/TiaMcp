@@ -659,6 +659,13 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
 
             var allItems = ParseSourceTreeList(File.Exists(listPath) ? File.ReadAllText(listPath) : itemList!);
             if (allItems.Count == 0) return $"No items recognized in the given list. {ItemListExample}";
+            // A label is split at its last '/', but an item name can hold a '/' itself
+            // ("Group/Pump 1/2"): the manifest knows where the group path ends.
+            if (manifest != null)
+                allItems = allItems.Select(i => manifest.Items.FirstOrDefault(m => m.Device == i.DeviceName && m.Kind == i.Kind
+                        && string.Equals(Label(m.GroupPath, m.Name), Label(i.GroupPath, i.ItemName), StringComparison.OrdinalIgnoreCase)) is { } m
+                    ? new ImportListItem(i.DeviceName, i.Kind, m.GroupPath, m.Name, i.Ok)
+                    : i).ToList();
             invalidCount = allItems.Count(i => !i.Ok);
             items = allItems.Where(i => i.Ok).ToList();
         }
