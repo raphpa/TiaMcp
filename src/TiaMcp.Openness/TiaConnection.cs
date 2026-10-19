@@ -128,17 +128,28 @@ public sealed partial class TiaConnection : IDisposable
             existing = openProjects.Count == 0 ? null : openProjects[0];
             if (existing == null)
             {
-                var openSessions = portal.LocalSessions;
-                if (openSessions.Count == 1)
+                var openSessionCount = 0;
+                try
                 {
-                    existingSession = openSessions[0];
-                    existing = existingSession.Project;
+                    var openSessions = portal.LocalSessions;
+                    openSessionCount = openSessions.Count;
+                    if (openSessionCount == 1)
+                    {
+                        var session = openSessions[0];
+                        var project = session.Project;
+                        existingSession = session;
+                        existing = project;
+                    }
                 }
-                else if (openSessions.Count > 1)
+                catch
+                {
+                    // A TIA install may not expose Multiuser sessions; preserve the plain-project path.
+                }
+                if (openSessionCount > 1)
                 {
                     portal.Dispose();
                     return new ConnectResult(false, null, null,
-                        $"TIA Portal process {processId} has {openSessions.Count} Multiuser local sessions open; refusing to guess which one to use.");
+                        $"TIA Portal process {processId} has {openSessionCount} Multiuser local sessions open; refusing to guess which one to use.");
                 }
             }
         }
