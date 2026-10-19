@@ -52,7 +52,9 @@ public sealed partial class TiaTools
         {
             return $"Connect failed: {result.Error}";
         }
-        return $"Connected to project '{result.ProjectName}' at {result.ProjectPath}.";
+        return result.ProjectPath == null
+            ? $"Connected to project '{result.ProjectName}'."
+            : $"Connected to project '{result.ProjectName}' at {result.ProjectPath}.";
     });
 
     [McpServerTool(Name = "list_tia_instances")]
@@ -93,7 +95,8 @@ public sealed partial class TiaTools
     public Task<string> CloseProject() => Safe(async () =>
     {
         var result = await _session.CloseProjectAsync();
-        return result.Success ? "Closed." : $"Close failed: {result.Error}";
+        if (result.Success) return "Closed.";
+        return _session.IsConnected ? $"Close failed: {result.Error}" : result.Error!;
     });
 
     [McpServerTool(Name = "project_status")]

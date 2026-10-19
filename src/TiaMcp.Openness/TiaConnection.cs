@@ -129,17 +129,11 @@ public sealed partial class TiaConnection : IDisposable
             if (existing == null)
             {
                 var openSessionCount = 0;
+                LocalSessionComposition? openSessions = null;
                 try
                 {
-                    var openSessions = portal.LocalSessions;
+                    openSessions = portal.LocalSessions;
                     openSessionCount = openSessions.Count;
-                    if (openSessionCount == 1)
-                    {
-                        var session = openSessions[0];
-                        var project = session.Project;
-                        existingSession = session;
-                        existing = project;
-                    }
                 }
                 catch
                 {
@@ -150,6 +144,11 @@ public sealed partial class TiaConnection : IDisposable
                     portal.Dispose();
                     return new ConnectResult(false, null, null,
                         $"TIA Portal process {processId} has {openSessionCount} Multiuser local sessions open; refusing to guess which one to use.");
+                }
+                if (openSessionCount == 1)
+                {
+                    existingSession = openSessions![0];
+                    existing = existingSession.Project;
                 }
             }
         }
@@ -189,7 +188,7 @@ public sealed partial class TiaConnection : IDisposable
         }
         if (sameOpenLocalSession)
         {
-            return FinalizeConnect(portal, existingSession!.Project, existingSession);
+            return FinalizeConnect(portal, existing!, existingSession, fileInfo.FullName);
         }
 
         if (existing != null)
@@ -204,7 +203,7 @@ public sealed partial class TiaConnection : IDisposable
             if (isLocalSessionFile)
             {
                 var session = portal.LocalSessions.Open(fileInfo);
-                return FinalizeConnect(portal, session.Project, session);
+                return FinalizeConnect(portal, session.Project, session, fileInfo.FullName);
             }
 
             var opened = portal.Projects.Open(fileInfo);
@@ -237,7 +236,7 @@ public sealed partial class TiaConnection : IDisposable
         return string.Equals(GetLocalSessionPath(session.Project.Path), sessionFile.FullName, StringComparison.OrdinalIgnoreCase);
     }
 
-    private ConnectResult FinalizeConnect(TiaPortal portal, ProjectBase project, LocalSession? localSession = null)
+    private ConnectResult FinalizeConnect(TiaPortal portal, ProjectBase project, LocalSession? localSession = null, string? localSessionPath = null)
     {
         _tiaPortal = portal;
         _project = project;
@@ -252,7 +251,7 @@ public sealed partial class TiaConnection : IDisposable
 
         var projectPath = localSession == null
             ? project.Path?.FullName
-            : GetLocalSessionPath(project.Path) ?? project.Path?.FullName;
+            : localSessionPath ?? GetLocalSessionPath(project.Path);
         return new ConnectResult(true, project.Name, projectPath, null);
     }
 
@@ -309,7 +308,14 @@ public sealed partial class TiaConnection : IDisposable
             _softwareByName.Clear();
             _hmiSoftwareByName.Clear();
             _hmiTargetByName.Clear();
-            portal?.Dispose();
+            try
+            {
+                portal?.Dispose();
+            }
+            catch (Exception ex)
+            {
+                return new SimpleResult(false, $"Project closed, but disposing the TIA Portal attachment failed: {ex.Message}");
+            }
             return new SimpleResult(true, null);
         }
         catch (Exception ex)
