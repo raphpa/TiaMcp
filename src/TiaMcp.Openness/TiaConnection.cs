@@ -177,10 +177,11 @@ public sealed partial class TiaConnection : IDisposable
             return new ConnectResult(false, null, null, $"Project file not found: {projectPath}");
         }
 
+        var isLocalSessionFile = Regex.IsMatch(fileInfo.Extension, @"^\.als\d+$", RegexOptions.IgnoreCase);
         var sameOpenProject = existing?.Path != null &&
             string.Equals(existing.Path.FullName, fileInfo.FullName, StringComparison.OrdinalIgnoreCase);
         var sameOpenLocalSession = existingSession != null &&
-            Regex.IsMatch(fileInfo.Extension, @"^\.als\d+$", RegexOptions.IgnoreCase) &&
+            isLocalSessionFile &&
             IsSameLocalSessionPath(existingSession, fileInfo);
         if (sameOpenProject)
         {
@@ -200,7 +201,7 @@ public sealed partial class TiaConnection : IDisposable
 
         try
         {
-            if (Regex.IsMatch(fileInfo.Extension, @"^\.als\d+$", RegexOptions.IgnoreCase))
+            if (isLocalSessionFile)
             {
                 var session = portal.LocalSessions.Open(fileInfo);
                 return FinalizeConnect(portal, session.Project, session);
