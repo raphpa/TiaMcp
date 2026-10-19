@@ -4,7 +4,7 @@ using System.Linq;
 using System.Text;
 using System.Xml.Linq;
 
-namespace TiaMcp.Openness;
+namespace TiaMcp.Formats;
 
 /// <summary>
 /// Converts the GRAPH-only XML produced by PlcBlock.Export/PlcBlockComposition.Import (a

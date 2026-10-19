@@ -15,4 +15,9 @@
     <ProjectReference Include="..\TiaMcp.Openness\TiaMcp.Openness.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\TiaMcp.Formats\TiaMcp.Formats.csproj" />
+    <Using Include="TiaMcp.Formats" />
+  </ItemGroup>
+
 </Project>

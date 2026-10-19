@@ -23,15 +23,6 @@ public sealed record TagTableSummary(string PlcName, string GroupPath, string Na
 
 public sealed record TypeSummary(string PlcName, string GroupPath, string Name);
 
-public sealed record TagInfo(string Name, string DataType, string LogicalAddress, string? Comment,
-    bool ExternalAccessible, bool ExternalVisible, bool ExternalWritable);
-
-public sealed record TagTableResult(bool Success, IReadOnlyList<TagInfo> Tags, string? Error);
-
-// Null optional fields mean "leave unchanged" on an existing tag.
-public sealed record TagSpec(string Name, string DataType, string? LogicalAddress, string? Comment = null,
-    bool? ExternalAccessible = null, bool? ExternalVisible = null, bool? ExternalWritable = null);
-
 public sealed record WriteTagsResult(bool Success, IReadOnlyList<string> Messages);
 
 public sealed record SimpleResult(bool Success, string? Error);
@@ -42,45 +33,7 @@ public sealed record HmiDeviceSummary(string DeviceName, string ItemName, string
 
 public sealed record HmiTagTableSummary(string HmiName, string GroupPath, string Name);
 
-public sealed record HmiTagInfo(string Name, string DataType, string? Address, string? Connection, string? PlcName, string? PlcTag, string? Comment, string? AcquisitionCycle);
-
 public sealed record HmiTagTableResult(bool Success, IReadOnlyList<HmiTagInfo> Tags, string? Error);
-
-// Null optional fields mean "leave unchanged" on an existing tag.
-public sealed record HmiTagSpec(string Name, string DataType, string? Address, string? Connection, string? PlcName, string? PlcTag, string? Comment = null,
-    string? AcquisitionCycle = null);
-
-public sealed record HmiAlarmClassInfo(string Name, int Priority, string? Log, int Id, bool IsSystem);
-
-public sealed record HmiAlarmClassSpec(string Name, int? Priority, string? Log);
-
-public sealed record HmiAlarmInfo(
-    string Type,
-    string Name,
-    string? AlarmClass,
-    string? EventText,
-    string? InfoText,
-    string? TriggerAddress,
-    string? Condition,
-    string? ConditionValue,
-    string? RaisedStateTag,
-    string? AuditClass,
-    string? Area,
-    string? Origin);
-
-public sealed record HmiAlarmSpec(
-    string Type,
-    string Name,
-    string? AlarmClass,
-    string? EventText,
-    string? InfoText,
-    string? TriggerAddress,
-    string? Condition,
-    string? ConditionValue,
-    string? RaisedStateTag,
-    string? AuditClass,
-    string? Area,
-    string? Origin);
 
 public sealed record HmiAlarmResult(bool Success, IReadOnlyList<HmiAlarmInfo> Alarms, string? Error);
 
@@ -90,11 +43,6 @@ public sealed record HmiClassicObjectSummary(string HmiName, string Kind, string
 
 // One classic object as Openness XML (without DocumentInfo), or why it couldn't be exported.
 public sealed record HmiClassicObjectXml(string Kind, string FolderPath, string Name, string? Xml, string? Error);
-
-// PLC alarm text list (user list): entries From/To (as text, like the export) with one text per language.
-public sealed record PlcAlarmTextEntry(string From, string To, IReadOnlyList<string> Texts);
-
-public sealed record PlcAlarmTextList(string Name, IReadOnlyList<string> Languages, IReadOnlyList<PlcAlarmTextEntry> Entries);
 
 public sealed record PlcAlarmTextListsResult(bool Success, IReadOnlyList<PlcAlarmTextList> Lists, string? Error);
 

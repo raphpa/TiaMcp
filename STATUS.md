@@ -10,15 +10,15 @@ For object types TiaMcp doesn't support yet, the notes say what the Openness API
 
 | Object | List | Create | Read | Update | Rename | Delete | Notes |
 |---|---|---|---|---|---|---|---|
-| Block: SCL / FBD / LAD / global DB | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | `.s7dcl` / `.s7res` |
+| Block: SCL / FBD / LAD / global DB | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | `.s7dcl` / `.s7res`, or `.xml` (every block) |
 | Block: GRAPH | ✅ | ⚠️ | ✅ | ⚠️ | ✅ | ✅ | `.graph.il`; create clones an existing GRAPH block as template; topology editing is limited |
 | Block: STL (whole block) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | `.awl` |
-| Block: embedded STL networks | ✅ | ❌ | ✅ | ❌ | ✅ | ✅ | Read-only sidecar (`.stl-networks.awl`); rename/delete act on the whole block |
+| Block: embedded STL networks | ✅ | ⚠️ | ✅ | ⚠️ | ✅ | ✅ | Read-only sidecar (`.stl-networks.awl`); the block is writable through its `.xml` only; rename/delete act on the whole block |
 | Instance-DB | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | Created from its `.s7dcl` or bound to an FB; read adds the resolved member list (`.interface.txt`) |
 | Block group | ⚠️ | ✅ | — | — | ✅ | ✅ | Only visible through the group paths of the blocks in it; empty groups are not listed |
-| UDT (PLC data type) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | `.s7dcl` / `.s7res` |
+| UDT (PLC data type) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | `.s7dcl` / `.s7res`, or `.xml` |
 | UDT group | ⚠️ | ✅ | — | — | ✅ | ✅ | Empty groups are not listed |
-| Tag table | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | `.csv` |
+| Tag table | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | `.csv`, or `.xml` (replaces the whole table) |
 | Tag | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | Through the tag table CSV (a removed row deletes the tag); rename via `rename_plc_tag` (keeps references) |
 | Tag table group | ✅ | ✅ | — | — | ✅ | ✅ | Empty groups are listed as `Group/` |
 | User constant | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | Openness: create, delete, import/export |

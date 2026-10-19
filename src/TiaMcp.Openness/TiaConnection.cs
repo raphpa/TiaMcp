@@ -436,21 +436,78 @@ public sealed partial class TiaConnection : IDisposable
     // walk already found: looking every block up by name again re-walks the tree from the top,
     // which made a full export quadratic in the block count (~0.3 s per lookup at ~500 blocks).
     // A block that throws is reported as a failed result instead of aborting the whole export.
-    // include (group path, name), when given, selects which blocks are read; the walk itself is cheap.
-    public IReadOnlyList<(BlockSummary Block, ExportResult Result)> ReadAllBlocks(string plcName, Func<string, string, bool>? include = null)
+    // formats (group path, name) selects which blocks are read and in which SourceFormats: null
+    // skips the block, an empty list reads its own format; the walk itself is cheap. Without it
+    // every block is read in its own format.
+    public IReadOnlyList<(BlockSummary Block, ExportResult Result)> ReadAllBlocks(string plcName, Func<string, string, IReadOnlyCollection<string>?>? formats = null)
     {
         EnsureConnected();
         var software = GetSoftware(plcName);
         var summaries = new List<BlockSummary>();
         var objects = new List<PlcBlock>();
         WalkBlocks(plcName, software.BlockGroup.Blocks, software.BlockGroup.Groups, "", summaries, objects);
-        return Selected(summaries, objects, include, s => (s.GroupPath, s.Name))
-            .Select(x => (x.Summary, ReadSafely(() => ReadBlock(software, x.Object)))).ToList();
+        return Selected(summaries, objects, formats, s => (s.GroupPath, s.Name))
+            .Select(x => (x.Summary, ReadSafely(() => ReadBlock(software, x.Object, x.Formats)))).ToList();
     }
 
-    private static IEnumerable<(TSummary Summary, TObject Object)> Selected<TSummary, TObject>(
-        List<TSummary> summaries, List<TObject> objects, Func<string, string, bool>? include, Func<TSummary, (string GroupPath, string Name)> key) =>
-        summaries.Select((s, i) => (Summary: s, Object: objects[i])).Where(x => include == null || include(key(x.Summary).GroupPath, key(x.Summary).Name));
+    private static IEnumerable<(TSummary Summary, TObject Object, IReadOnlyCollection<string> Formats)> Selected<TSummary, TObject>(
+        List<TSummary> summaries, List<TObject> objects, Func<string, string, IReadOnlyCollection<string>?>? formats, Func<TSummary, (string GroupPath, string Name)> key) =>
+        summaries.Select((s, i) => (Summary: s, Object: objects[i], Formats: formats == null ? Array.Empty<string>() : formats(key(s).GroupPath, key(s).Name)))
+            .Where(x => x.Formats != null)
+            .Select(x => (x.Summary, x.Object, (IReadOnlyCollection<string>)x.Formats!));
+
+    // Reads an object in the requested formats - its own format (any format but "xml", or an empty
+    // list) and/or the raw XML - with one Openness XML export at most: readOwn gets a capture that
+    // keeps the XML when its own path exports it anyway (a GRAPH block, a tag table, the title
+    // cross-check), and only otherwise is the XML exported separately.
+    private static ExportResult ReadInFormats(string name, IReadOnlyCollection<string> formats, Func<RawXmlCapture?, ExportResult> readOwn, Action<FileInfo> exportXml)
+    {
+        var xmlName = name + SourceFormat.Extension(SourceFormat.Xml);
+        if (formats.Count > 0 && formats.All(f => f == SourceFormat.Xml))
+            return new ExportResult(true, new[] { new BlockDocument(xmlName, ExportXml(exportXml)) }, null);
+
+        var capture = formats.Contains(SourceFormat.Xml) ? new RawXmlCapture() : null;
+        var result = readOwn(capture);
+        if (capture == null || !result.Success) return result;
+        var xml = capture.Xml ?? ExportXml(exportXml);
+        return result with { Documents = result.Documents.Append(new BlockDocument(xmlName, xml)).ToList() };
+    }
+
+    // The XML of an Openness Export() as text, without DocumentInfo (export time, installed
+    // products), so an unchanged object always gives the same text.
+    private static string ExportXml(Action<FileInfo> export)
+    {
+        var outDir = new DirectoryInfo(Path.Combine(Path.GetTempPath(), "TiaMcp", "export-xml", Guid.NewGuid().ToString("N")));
+        outDir.Create();
+        try
+        {
+            var file = new FileInfo(Path.Combine(outDir.FullName, "export.xml"));
+            try { export(file); }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException($"XML export failed - an inconsistent block or UDT can't be exported as XML, call compile_plc first: {ex.Message}", ex);
+            }
+            return NormalizedXml(file);
+        }
+        finally
+        {
+            try { outDir.Delete(true); } catch { /* best effort cleanup */ }
+        }
+    }
+
+    private static string NormalizedXml(FileInfo file)
+    {
+        var doc = XDocument.Load(file.FullName);
+        doc.Root?.Element("DocumentInfo")?.Remove();
+        return doc.ToString();
+    }
+
+    // Keeps the raw XML a read path exports for its own use - see ReadInFormats.
+    private sealed class RawXmlCapture
+    {
+        public string? Xml { get; private set; }
+        public void Take(FileInfo file) => Xml = NormalizedXml(file);
+    }
 
     private static ExportResult ReadSafely(Func<ExportResult> read)
     {
@@ -483,11 +540,16 @@ public sealed partial class TiaConnection : IDisposable
         }
     }
 
-    private ExportResult ReadBlock(PlcSoftware software, PlcBlock block)
+    private ExportResult ReadBlock(PlcSoftware software, PlcBlock block, IReadOnlyCollection<string> formats) =>
+        ReadInFormats(block.Name, formats, capture => ReadBlockOwnFormat(software, block, capture), f => block.Export(f, ExportOptions.WithDefaults));
+
+    // A block's own format: GRAPH is converted from the XML ('.graph.il'), whole-block STL is
+    // 'Generate source' text ('.awl'), the rest TIA Portal's document format ('.s7dcl').
+    private ExportResult ReadBlockOwnFormat(PlcSoftware software, PlcBlock block, RawXmlCapture? capture)
     {
         if (block.ProgrammingLanguage == ProgrammingLanguage.GRAPH)
         {
-            return ReadGraphBlock(block);
+            return ReadGraphBlock(block, capture);
         }
 
         if (block.ProgrammingLanguage == ProgrammingLanguage.STL)
@@ -523,7 +585,7 @@ public sealed partial class TiaConnection : IDisposable
             // network(s) separately (see ReadMixedStlBlock's doc comment for the full mechanism).
             if (exportError != null && exportError.Contains("cannot be exported to or imported from SIMATIC SD"))
             {
-                return ReadMixedStlBlock(software, block);
+                return ReadMixedStlBlock(software, block, capture);
             }
 
             var docs = result?.ExportedDocuments
@@ -545,7 +607,7 @@ public sealed partial class TiaConnection : IDisposable
             // XML export per DB.
             if (block is not DataBlock)
             {
-                try { PatchMissingNetworkTitles(block, docs); } catch { /* best effort - leave docs as ExportAsDocuments produced them */ }
+                try { PatchMissingNetworkTitles(block, docs, capture); } catch { /* best effort - leave docs as ExportAsDocuments produced them */ }
             }
 
             // Checked before adding the interface below: an instance DB with only its
@@ -578,7 +640,7 @@ public sealed partial class TiaConnection : IDisposable
     // site's comment for why this is needed even outside the STL-relay path. Mutates docs in
     // place; throws on any unexpected shape so the caller's best-effort catch leaves docs as they
     // were (a failed patch attempt must never be worse than no patch attempt).
-    private static void PatchMissingNetworkTitles(PlcBlock block, List<BlockDocument> docs)
+    private static void PatchMissingNetworkTitles(PlcBlock block, List<BlockDocument> docs, RawXmlCapture? capture)
     {
         var dclIndex = docs.FindIndex(d => d.FileName.EndsWith(".s7dcl", StringComparison.OrdinalIgnoreCase));
         if (dclIndex < 0) return;
@@ -589,6 +651,7 @@ public sealed partial class TiaConnection : IDisposable
         {
             var xmlFile = new FileInfo(Path.Combine(outDir.FullName, FileStem(block.Name) + ".xml"));
             block.Export(xmlFile, ExportOptions.WithDefaults);
+            capture?.Take(xmlFile);
             var xdoc = XDocument.Load(xmlFile.FullName);
             var compileUnits = xdoc.Descendants("SW.Blocks.CompileUnit").ToList();
             if (compileUnits.Count == 0) return;
@@ -626,7 +689,7 @@ public sealed partial class TiaConnection : IDisposable
     // route simply doesn't support GRAPH's language. The only working mechanism is this
     // different Siemens API - PlcBlock.Export(FileInfo, ExportOptions) producing a single XML
     // document - which additionally requires the block to be consistent (compiled) first.
-    private ExportResult ReadGraphBlock(PlcBlock block)
+    private ExportResult ReadGraphBlock(PlcBlock block, RawXmlCapture? capture)
     {
         if (!block.IsConsistent)
         {
@@ -652,6 +715,7 @@ public sealed partial class TiaConnection : IDisposable
             try
             {
                 xml = File.ReadAllText(outFile.FullName);
+                capture?.Take(outFile);
             }
             catch (Exception ex)
             {
@@ -729,7 +793,7 @@ public sealed partial class TiaConnection : IDisposable
     // (filtered from the same original export - a lossless subset, not a translated rendering).
     // The temp group (and the block inside it) is deleted immediately after, leaving zero trace
     // in the project. No compile is needed anywhere in this path.
-    private ExportResult ReadMixedStlBlock(PlcSoftware software, PlcBlock block)
+    private ExportResult ReadMixedStlBlock(PlcSoftware software, PlcBlock block, RawXmlCapture? capture)
     {
         var outDir = new DirectoryInfo(Path.Combine(Path.GetTempPath(), "TiaMcp", "export-stl-relay", Guid.NewGuid().ToString("N")));
         outDir.Create();
@@ -746,6 +810,7 @@ public sealed partial class TiaConnection : IDisposable
                 return new ExportResult(false, Array.Empty<BlockDocument>(),
                     $"Could not export the block via the XML route to relay around its embedded STL network(s): {ex.Message}");
             }
+            capture?.Take(xmlFile);
 
             var xdoc = XDocument.Load(xmlFile.FullName);
             var compileUnits = xdoc.Descendants("SW.Blocks.CompileUnit").ToList();
@@ -858,6 +923,20 @@ public sealed partial class TiaConnection : IDisposable
                 }
             }
             catch { /* best effort - leave the plain relayed .s7dcl/.s7res as they were */ }
+
+            // The relay block is a fresh import on every read, so TIA Portal gives its texts new ids
+            // each time; renumber them so an unchanged block reads back identically (otherwise
+            // write_source_tree sees it as changed in TIA Portal since the read).
+            {
+                var dclIndex = docs.FindIndex(d => d.FileName.EndsWith(".s7dcl", StringComparison.OrdinalIgnoreCase));
+                if (dclIndex >= 0)
+                {
+                    var resIndex = docs.FindIndex(d => d.FileName.EndsWith(".s7res", StringComparison.OrdinalIgnoreCase));
+                    var (dcl, res) = MlcIds.Renumber(docs[dclIndex].Content, resIndex >= 0 ? docs[resIndex].Content : null);
+                    docs[dclIndex] = docs[dclIndex] with { Content = dcl };
+                    if (resIndex >= 0) docs[resIndex] = docs[resIndex] with { Content = res! };
+                }
+            }
 
             // Each network's title/comment now also lives in .s7dcl/.s7res (above, best effort) so it
             // reads consistently across the whole block; only the STL instructions themselves - which
@@ -1252,10 +1331,9 @@ public sealed partial class TiaConnection : IDisposable
             {
                 foreach (var m in members)
                 {
-                    // Quote names that aren't plain identifiers (e.g. "M1-01"), as the object
-                    // model does.
+                    // Quoted like an SCL access path needs it (e.g. "M1-01", "Date").
                     var name = (string?)m.Attribute("Name") ?? "?";
-                    var path = prefix + (Regex.IsMatch(name, "^[A-Za-z_][A-Za-z0-9_]*$") ? name : $"\"{name}\"");
+                    var path = prefix + SclNames.Element(name);
                     lines.Add($"{path} : {(string?)m.Attribute("Datatype") ?? "?"}");
                     Walk(ChildMembers(m), path + ".");
                 }
@@ -1293,21 +1371,21 @@ public sealed partial class TiaConnection : IDisposable
             string dataType;
             try { dataType = member.GetAttribute("DataTypeName")?.ToString() ?? "?"; }
             catch { dataType = "?"; }
-            sb.AppendLine($"{member.Name} : {dataType}");
+            sb.AppendLine($"{SclNames.Element(member.Name)} : {dataType}");
         }
         return sb.ToString();
     }
 
     // Bulk ListPlcTypes + ReadUdt for read_source_tree - see ReadAllBlocks.
-    public IReadOnlyList<(TypeSummary Type, ExportResult Result)> ReadAllUdts(string plcName, Func<string, string, bool>? include = null)
+    public IReadOnlyList<(TypeSummary Type, ExportResult Result)> ReadAllUdts(string plcName, Func<string, string, IReadOnlyCollection<string>?>? formats = null)
     {
         EnsureConnected();
         var software = GetSoftware(plcName);
         var summaries = new List<TypeSummary>();
         var objects = new List<PlcType>();
         WalkTypes(plcName, software.TypeGroup.Types, software.TypeGroup.Groups, "", summaries, objects);
-        return Selected(summaries, objects, include, s => (s.GroupPath, s.Name))
-            .Select(x => (x.Summary, ReadSafely(() => ReadUdt(x.Object)))).ToList();
+        return Selected(summaries, objects, formats, s => (s.GroupPath, s.Name))
+            .Select(x => (x.Summary, ReadSafely(() => ReadInFormats(x.Object.Name, x.Formats, _ => ReadUdt(x.Object), f => x.Object.Export(f, ExportOptions.WithDefaults))))).ToList();
     }
 
     // UDTs (PlcType) export via the same ExportAsDocuments/.s7dcl route as SCL/FBD/LAD blocks,
@@ -2226,37 +2304,36 @@ public sealed partial class TiaConnection : IDisposable
     }
 
     // Bulk ListTagTables + ReadTagTable for read_source_tree - see ReadAllBlocks.
-    public IReadOnlyList<(TagTableSummary Table, TagTableResult Result)> ReadAllTagTables(string plcName, Func<string, string, bool>? include = null)
+    // Each table as '<name>.csv' (see TagTableCsv) and/or '<name>.xml' - see ReadAllBlocks.
+    public IReadOnlyList<(TagTableSummary Table, ExportResult Result)> ReadAllTagTables(string plcName, Func<string, string, IReadOnlyCollection<string>?>? formats = null)
     {
         EnsureConnected();
         var software = GetSoftware(plcName);
         var summaries = new List<TagTableSummary>();
         var objects = new List<PlcTagTable>();
         WalkTagTables(plcName, software.TagTableGroup.TagTables, software.TagTableGroup.Groups, "", summaries, objects);
-        return Selected(summaries, objects, include, s => (s.GroupPath, s.Name)).Select(x =>
-        {
-            try { return (x.Summary, ReadTagTable(x.Object)); }
-            catch (Exception ex) { return (x.Summary, new TagTableResult(false, Array.Empty<TagInfo>(), ex.Message)); }
-        }).ToList();
+        return Selected(summaries, objects, formats, s => (s.GroupPath, s.Name))
+            .Select(x => (x.Summary, ReadSafely(() => ReadInFormats(x.Object.Name, x.Formats,
+                capture => new ExportResult(true, new[] { new BlockDocument(x.Object.Name + SourceFormat.Extension(SourceFormat.Csv), TagTableCsv.Format(ReadTags(x.Object, capture))) }, null),
+                f => x.Object.Export(f, ExportOptions.WithDefaults))))).ToList();
     }
 
     // Reads the tags from one XML Export() of the table: reading them property by property costs
     // a round trip to TIA Portal per property (~5 ms per tag, against ~1 ms per tag this way).
     // Falls back to the object model if the export or parse fails.
-    private static TagTableResult ReadTagTable(PlcTagTable table)
+    private static TagInfo[] ReadTags(PlcTagTable table, RawXmlCapture? capture)
     {
-        try { return new TagTableResult(true, ReadTagsFromXml(table), null); }
+        try { return ReadTagsFromXml(table, capture); }
         catch
         {
-            var tags = table.Tags
+            return table.Tags
                 .Select(t => new TagInfo(t.Name, t.DataTypeName, t.LogicalAddress, ExtractText(t.Comment),
                     t.ExternalAccessible, t.ExternalVisible, t.ExternalWritable))
                 .ToArray();
-            return new TagTableResult(true, tags, null);
         }
     }
 
-    private static TagInfo[] ReadTagsFromXml(PlcTagTable table)
+    private static TagInfo[] ReadTagsFromXml(PlcTagTable table, RawXmlCapture? capture)
     {
         var outDir = new DirectoryInfo(Path.Combine(Path.GetTempPath(), "TiaMcp", "tagtable", Guid.NewGuid().ToString("N")));
         outDir.Create();
@@ -2264,6 +2341,7 @@ public sealed partial class TiaConnection : IDisposable
         {
             var xmlFile = new FileInfo(Path.Combine(outDir.FullName, "tagtable.xml"));
             table.Export(xmlFile, ExportOptions.WithDefaults);
+            capture?.Take(xmlFile);
 
             // The XML lists comment languages in a different order than the object model's
             // Comment.Items, which ExtractText (and so every earlier export) follows. Take that

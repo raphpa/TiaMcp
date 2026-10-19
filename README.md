@@ -20,13 +20,16 @@ Special features that make TiaMcp fast for LLM's and human-readable friendly:
 | GRAPH (S7-GRAPH/SFC) | `.graph.il` | Yes | Partial |
 | Instance-DB | `.s7dcl` + read-only `.interface.txt` (resolved member list) | Yes | Create-only |
 | STL (whole-block) | `.awl` | Yes | Yes |
-| STL (embedded in mixed FBD/LAD/SCL block) | `.stl-networks.awl` (or `.stl-networks.xml` fallback) + `.s7dcl`/`.s7res` | Yes | No |
+| STL (embedded in mixed FBD/LAD/SCL block) | `.stl-networks.awl` (or `.stl-networks.xml` fallback) + `.s7dcl`/`.s7res` | Yes | Through `.xml` only |
 | UDT (PLC data type) | `.s7dcl` / `.s7res` | Yes | Yes |
 | PLC tag table | `.csv`, Excel-compatible (synthesized) | Yes | Yes |
 | HMI tag table (WinCC Unified) | `.csv`, Excel-compatible (synthesized) | Yes | Yes |
 | HMI alarms (WinCC Unified) | `.csv`, Excel-compatible (synthesized) | Yes | Yes |
 | PLC alarm text list (user list) | `.csv`, Excel-compatible (synthesized from TIA's Excel export) | Yes | Yes (existing lists) |
 | Classic WinCC (Comfort/Advanced/RT Advanced): screens, screen templates, pop-up screens, tag tables, text lists | `.xml`, native Openness XML | Yes | Yes |
+| Raw export of any block, UDT or PLC tag table, next to or instead of the formats above | `.xml`, SimaticML as Openness exports it | Yes | Yes |
+
+Each item line of `list_project` ends with the formats it can be read in, e.g. `tag table 'Tags' [csv, xml]`; pass such a line to `read_source_tree` to read those formats. A write uses the one format whose files were edited, and refuses an item edited in two.
 
 All source is read and written as files in a [source tree](#source-tree) on disk, so an LLM reads only what it needs and edits with small diffs instead of passing whole blocks through its context.
 
@@ -41,7 +44,7 @@ All source is read and written as files in a [source tree](#source-tree) on disk
 dotnet build TiaMcp.sln
 ```
 
-Produces `src\TiaMcp.Host\bin\Debug\net48\TiaMcp.Host.exe`, the MCP stdio server entry point.
+Produces `src\TiaMcp.Host\bin\Debug\net48\TiaMcp.Host.exe`, the MCP stdio server entry point. `dotnet test TiaMcp.sln` runs the unit tests (no TIA Portal needed).
 
 ## Registering with Claude Code
 
@@ -196,7 +199,7 @@ PLC alarm text lists: one CSV per user list (`From`, `To`, one `Text [language]`
 
 Classic WinCC objects are native Openness XML (the `DocumentInfo` block is left out so an unchanged object reads back identically). They are written in dependency order (text lists, tag tables, templates and pop-ups, screens); a screen whose `<Number>` is already used by another screen is refused before the import, since TIA Portal V21 terminates itself on that. Graphic lists are not exported: exporting one crashed TIA Portal V21 (`InvalidCastException` in `UpdateOpenLinks`); a full read reports them as SKIPPED.
 
-`_manifest.json` records what each item looked like when it was read. An item that was changed in TIA Portal since then is refused rather than overwritten (`force` overrides this). A tree read from one project can also be written in full into another, e.g. to restore it into an empty PLC.
+`_manifest.json` (version 2; an older version 1 manifest is still read) records what each item looked like when it was read, and in which formats. An item that was changed in TIA Portal since then is refused rather than overwritten (`force` overrides this). A tree read from one project can also be written in full into another, e.g. to restore it into an empty PLC.
 
 ## License
 
@@ -209,7 +212,7 @@ AGPL-3.0 (see [LICENSE](LICENSE)). Contributions require signing the [CLA](CLA.m
 
 ## Known limitations
 
-- STL embedded in a mixed FBD/LAD/SCL block is read-only; whole-block STL is fully supported (see the STL section above).
+- A block with STL embedded in a mixed FBD/LAD/SCL block can only be written through its raw `.xml`; whole-block STL is fully supported (see the STL section above).
 - GRAPH blocks can only be created by cloning an existing one (see the GRAPH section above), not from scratch.
 - Classic WinCC (Comfort/Advanced/RT Advanced): alarms are not reachable through Openness; graphic lists are skipped (export crashes TIA Portal V21); objects can't be renamed or deleted through TiaMcp yet.
 - PLC alarm text lists: only existing user lists can be written; the screen-number check for classic screens exports every screen once per write (about a minute for ~50 screens).

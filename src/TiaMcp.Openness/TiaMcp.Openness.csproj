@@ -32,4 +32,9 @@
     </Reference>
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\TiaMcp.Formats\TiaMcp.Formats.csproj" />
+    <Using Include="TiaMcp.Formats" />
+  </ItemGroup>
+
 </Project>
