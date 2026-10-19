@@ -302,13 +302,14 @@ public sealed partial class TiaConnection : IDisposable
             if (_localSession != null) _localSession.Close();
             else if (_project is Project project) project.Close();
             else return new SimpleResult(false, "Close is not supported for this project type.");
-            _tiaPortal?.Dispose();
+            var portal = _tiaPortal;
             _tiaPortal = null;
             _project = null;
             _localSession = null;
             _softwareByName.Clear();
             _hmiSoftwareByName.Clear();
             _hmiTargetByName.Clear();
+            portal?.Dispose();
             return new SimpleResult(true, null);
         }
         catch (Exception ex)
