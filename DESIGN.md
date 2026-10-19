@@ -26,32 +26,35 @@ TiaMcp makes a TIA Portal project workable for an LLM by mirroring it as a **sou
 |---|---|
 | `TiaMcp.Formats` | File format converters (CSV, GRAPH DSL) and the records they convert. No Openness or MCP dependency. |
 | `TiaMcp.Openness` | All Openness API calls, run on one STA thread (`StaDispatcher`). No MCP code. |
-| `TiaMcp.Mcp` | MCP tools, the source tree and the manifest. `TiaSession` is the only path into Openness. |
+| `TiaMcp.Mcp` | MCP tools, the source tree and the manifest. One handler per kind in `SourceKinds/`. `TiaSession` is the only path into Openness. |
 | `TiaMcp.Host` | stdio entry point, Openness assembly resolving. |
 | `tests/TiaMcp.Tests` | Unit tests for `TiaMcp.Formats`. They run without TIA Portal. Samples are made up; real exports stay outside the repo. |
 
 A converter is pure: text in, records or text out. Every converter has round-trip tests (`parse(format(x)) == x`, unedited write is a no-op) and tests that bad input gives a `FormatException` with the line, not a crash.
 
-## Adding an object type (today)
+## Kind handlers
+
+Each kind of item (block, UDT, tag table, HMI screen, ...) is one class implementing `ISourceKind` in `src/TiaMcp.Mcp/SourceKinds/`: its name, section, device family (PLC, WinCC Unified, classic WinCC), file extensions, and how it is listed, exported and written. `SourceKinds.All` registers them in write order, so what an item references is written first. `list_project`, `read_source_tree`, `write_source_tree`, new-file detection and the item-line parsing loop over this registry; `TiaTools` has no per-kind code.
+
+## Adding an object type
 
 Touch, in this order:
 1. `TiaMcp.Formats`: the converter and its records, with tests in `tests/TiaMcp.Tests` (not needed for native Openness XML).
 2. `TiaConnection.<Area>.cs`: list, export and import.
 3. `TiaSession`: an async wrapper for each new call.
-4. `TiaTools`: the kind name in `ListedItem`, `SectionOf` and `KindOrder`; export in `ExportItems`; import at the right place in the dependency order in `WriteSourceTree`; new-file detection in `NewItemsInTree`; the item lines in `list_project`.
+4. The handler: a class implementing `ISourceKind`, registered in `SourceKinds.All` at its place in the write order, and its name in `SourceKinds.ListOrder`.
 5. Lifecycle tools, if Openness supports them.
 6. README (format table) and STATUS (object table).
 
 ## Future (target design, not implemented)
 
-- **A handler per kind.** Each kind is one class implementing `ISourceKind`: kind name, section, write order, formats, export and import. `ExportItems`, `WriteSourceTree`, `list_project` and the selection parsing loop over the registered kinds. Adding an object type then means adding one class and registering it.
 - **Several formats per item.** Each kind offers its friendly format first and, where Openness has one, its raw export (SimaticML `.xml`) as a fallback for lossy conversions and debugging. Some kinds have no raw export (Unified screens, HMI tags and alarms, PLC alarm text lists), so they offer only the friendly format.
   - `list_project` and `_export_summary.txt` show the available formats on each item line, e.g. `tag table 'Motors' [csv, xml]`. Passing such a line to `read_source_tree` reads those formats, and several may be read at once.
   - A write accepts only **one edited format per item**: the extension decides the import route, and an item with more than one edited format is refused. The read-back refreshes every format in the tree.
 - **Manifest v2.** The manifest gets a `"version": 2` field. Each item gets `"formats": ["csv", "xml"]`. Each file becomes an object instead of a bare hash, `{ "hash": "...", "format": "csv" }`, so that later fields (multiuser state, timestamps) can be added without another schema change. The v1 manifest (path → hash) stays readable.
-- **Smaller files.** `TiaConnection` and `TiaTools` are split per kind instead of having a few large files.
+- **Smaller files.** `TiaConnection` is split per kind instead of having a few large files.
 - **`TiaSession.Run(c => c.X())`** replaces the one-line async wrappers.
-- **Generic lifecycle tools** (`rename_item`, `delete_item` with a kind parameter) replace the per-kind rename/delete/group tools, once the kind handlers exist.
+- **Generic lifecycle tools** (`rename_item`, `delete_item` with a kind parameter) replace the per-kind rename/delete/group tools, through the kind handlers.
 - **Classic WinCC as JSON**, like Unified screens, with the XML kept as its raw format.
 
 When something in this section is implemented, move it into the sections above and update "Adding an object type".

@@ -8,6 +8,7 @@ using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using ModelContextProtocol.Server;
 using TiaMcp.Openness;
+using static TiaMcp.Mcp.SourceTree;
 
 namespace TiaMcp.Mcp;
 
@@ -15,6 +16,9 @@ namespace TiaMcp.Mcp;
 public sealed partial class TiaTools
 {
     private readonly TiaSession _session;
+
+    // Notes of the last ExportItems for the read result (e.g. graphic lists that are skipped).
+    private readonly List<string> _exportNotes = new();
 
     public TiaTools(TiaSession session)
     {
@@ -110,13 +114,6 @@ public sealed partial class TiaTools
                $"Last modified: {s.LastModified:u} by {s.LastModifiedBy}\n" +
                $"Version: {s.Version}";
     });
-
-    private static List<BlockDocument> UdtDocuments(string typeName, string content, string? resContent)
-    {
-        var docs = new List<BlockDocument> { new($"{typeName}.s7dcl", content) };
-        if (!string.IsNullOrEmpty(resContent)) docs.Add(new BlockDocument($"{typeName}.s7res", resContent!));
-        return docs;
-    }
 
     [McpServerTool(Name = "delete_plc_udt")]
     [Description("Delete a UDT (PLC data type) by name. Fails with TIA Portal's own error if the UDT is still used as a member type by another UDT or block interface. This is destructive - confirm with the user before calling.")]
@@ -428,73 +425,28 @@ Without filter or deviceName, a project of more than 200 items only gets counts 
         if (!_session.IsConnected) return "Not connected. Call tia_connect first.";
 
         bool Matches(string groupPath, string name) => filter == null || Label(groupPath, name).IndexOf(filter, StringComparison.OrdinalIgnoreCase) >= 0;
-        bool IsSelectedDevice(string device) => deviceName == null || string.Equals(device, deviceName, StringComparison.OrdinalIgnoreCase);
-
         var list = new StringBuilder();
         var counts = new StringBuilder();
         var total = 0;
-        var devices = 0;
-        foreach (var plc in (await _session.ListDevicesAsync()).Select(d => d.PlcSoftwareName).OfType<string>().Where(IsSelectedDevice))
+        var devices = await Devices(deviceName);
+        foreach (var (family, device) in devices)
         {
-            devices++;
-            var blocks = (await _session.ListBlocksAsync(plc)).Where(b => Matches(b.GroupPath, b.Name)).ToList();
-            var allTables = await _session.ListTagTablesAsync(plc);
-            var tables = allTables.Where(t => Matches(t.GroupPath, t.Name)).ToList();
-            var emptyGroups = EmptyGroups(allTables.Select(t => t.GroupPath), await _session.ListTagTableGroupsAsync(plc)).Where(g => Matches(g, "")).ToList();
-            var types = (await _session.ListPlcTypesAsync(plc)).Where(t => Matches(t.GroupPath, t.Name)).ToList();
-            var textLists = (await _session.ListPlcAlarmTextListNamesAsync(plc)).Where(n => Matches("", n)).ToList();
+            var kinds = new List<(ISourceKind Kind, List<ListedEntry> Entries)>();
+            foreach (var kind in SourceKinds.Of(family).OrderBy(k => SourceKinds.ListIndex(k.Name)))
+                kinds.Add((kind, (await kind.List(_session, device)).Where(e => Matches(e.GroupPath, e.Name)).ToList()));
 
-            var found = blocks.Count + tables.Count + emptyGroups.Count + types.Count + textLists.Count;
+            var found = kinds.Sum(k => k.Entries.Count);
             total += found;
-            counts.AppendLine($"{plc}: {blocks.Count} block(s) ({blocks.Count(b => !b.Consistent)} inconsistent), {types.Count} UDT(s), {tables.Count} tag table(s), {textLists.Count} alarm text list(s)");
+            counts.AppendLine($"{device}{(family == DeviceFamily.Plc ? "" : family == DeviceFamily.HmiClassic ? " (HMI, classic WinCC)" : " (HMI)")}: " +
+                              string.Join(", ", kinds.Where(k => k.Kind.FixedName == null).Select(k => CountLine(k.Kind, k.Entries))));
             if (found == 0 && filter != null) continue;
 
-            list.AppendLine($"=== {plc} ===");
-            foreach (var b in blocks) list.AppendLine($"  {Describe("block", b.GroupPath, b.Name)} [{b.Language}]{(b.Consistent ? "" : " INCONSISTENT")}");
-            foreach (var t in tables) list.AppendLine($"  {Describe("tag table", t.GroupPath, t.Name)}");
-            foreach (var g in emptyGroups) list.AppendLine($"  tag table group '{g}' (empty)");
-            foreach (var t in types) list.AppendLine($"  {Describe("udt", t.GroupPath, t.Name)}");
-            foreach (var n in textLists) list.AppendLine($"  {Describe(AlarmTextListKind, "", n)}");
+            list.AppendLine(Header(family, device));
+            foreach (var entry in kinds.SelectMany(k => k.Entries)) list.AppendLine($"  {entry.Text}");
             list.AppendLine();
         }
 
-        foreach (var hmi in (await _session.ListHmiDevicesAsync()).Select(h => h.HmiSoftwareName).Where(IsSelectedDevice))
-        {
-            devices++;
-            var allTables = await _session.ListHmiTagTablesAsync(hmi);
-            var tables = allTables.Where(t => Matches(t.GroupPath, t.Name)).ToList();
-            var emptyGroups = EmptyGroups(allTables.Select(t => t.GroupPath), await _session.ListHmiTagTableGroupsAsync(hmi)).Where(g => Matches(g, "")).ToList();
-            var alarms = HmiAlarmKinds.Where(k => Matches("HMI alarms", ItemStem(k, ""))).ToList();
-
-            var found = tables.Count + emptyGroups.Count + alarms.Count;
-            total += found;
-            counts.AppendLine($"{hmi} (HMI): {tables.Count} tag table(s), alarms");
-            if (found == 0 && filter != null) continue;
-
-            list.AppendLine($"=== {hmi} (HMI) ===");
-            foreach (var t in tables) list.AppendLine($"  {Describe("HMI tag table", t.GroupPath, t.Name)}");
-            foreach (var g in emptyGroups) list.AppendLine($"  HMI tag table group '{g}' (empty)");
-            foreach (var kind in alarms) list.AppendLine($"  {kind}");
-            list.AppendLine();
-        }
-
-        foreach (var hmi in (await _session.ListHmiClassicNamesAsync()).Where(IsSelectedDevice))
-        {
-            devices++;
-            var objects = (await _session.ListHmiClassicObjectsAsync(hmi))
-                .Where(o => o.Kind != HmiClassicKinds.GraphicList && Matches(o.FolderPath, o.Name))
-                .OrderBy(o => Array.IndexOf(KindOrder, TreeKindOf(o.Kind))).ThenBy(o => Label(o.FolderPath, o.Name), StringComparer.OrdinalIgnoreCase)
-                .ToList();
-            total += objects.Count;
-            counts.AppendLine($"{hmi} (HMI, classic WinCC): {string.Join(", ", ClassicKinds.Select(k => $"{objects.Count(o => o.Kind == k.ClassicKind)} {k.TreeKind.Substring(4)}(s)"))}");
-            if (objects.Count == 0 && filter != null) continue;
-
-            list.AppendLine($"=== {hmi} (HMI) ===");
-            foreach (var o in objects) list.AppendLine($"  {Describe(TreeKindOf(o.Kind), o.FolderPath, o.Name)}");
-            list.AppendLine();
-        }
-
-        if (devices == 0) return deviceName == null ? "No PLC or HMI software found." : $"No PLC or HMI software named '{deviceName}'.";
+        if (devices.Count == 0) return deviceName == null ? "No PLC or HMI software found." : $"No PLC or HMI software named '{deviceName}'.";
 
         string? listPath = null;
         if (!string.IsNullOrEmpty(targetDirectory))
@@ -510,11 +462,24 @@ Without filter or deviceName, a project of more than 200 items only gets counts 
             : "Pass filter or deviceName to list items, or targetDirectory to write the full list to a file.");
     });
 
-    // Groups with no tag table anywhere below them - otherwise empty groups would be invisible.
-    private static IEnumerable<string> EmptyGroups(IEnumerable<string> tableGroupPaths, IReadOnlyList<string> groups)
+    private static string CountLine(ISourceKind kind, List<ListedEntry> entries)
     {
-        var used = tableGroupPaths.ToList();
-        return groups.Where(g => !used.Any(p => p == g || p.StartsWith(g + "/")));
+        var inconsistent = entries.Count(e => e.Inconsistent);
+        return $"{entries.Count(e => e.IsItem)} {kind.Name}(s){(inconsistent > 0 ? $" ({inconsistent} inconsistent)" : "")}";
+    }
+
+    private static string Header(DeviceFamily family, string device) =>
+        family == DeviceFamily.Plc ? $"=== {device} ===" : $"=== {device} (HMI) ===";
+
+    // Every PLC and HMI software of the project, or only deviceName's, with its family.
+    private async Task<List<(DeviceFamily Family, string Name)>> Devices(string? deviceName)
+    {
+        bool IsSelected(string device) => deviceName == null || string.Equals(device, deviceName, StringComparison.OrdinalIgnoreCase);
+        var devices = new List<(DeviceFamily, string)>();
+        devices.AddRange((await _session.ListDevicesAsync()).Select(d => d.PlcSoftwareName).OfType<string>().Where(IsSelected).Select(n => (DeviceFamily.Plc, n)));
+        devices.AddRange((await _session.ListHmiDevicesAsync()).Select(h => h.HmiSoftwareName).Where(IsSelected).Select(n => (DeviceFamily.HmiUnified, n)));
+        devices.AddRange((await _session.ListHmiClassicNamesAsync()).Where(IsSelected).Select(n => (DeviceFamily.HmiClassic, n)));
+        return devices;
     }
 
     [McpServerTool(Name = "read_source_tree")]
@@ -580,37 +545,11 @@ An item that fails to export (e.g. an inconsistent block - GRAPH blocks must be 
             if (!item.Ok) result.AppendLine($"  FAILED  {Describe(item.Kind, item.GroupPath, item.Name)}: {item.Error}");
             else if (partial) result.AppendLine($"  OK      {Describe(item.Kind, item.GroupPath, item.Name)}: {string.Join(", ", item.Files.Select(f => f.Path))}");
         }
-        foreach (var item in gone) result.AppendLine($"  REMOVED {Describe(item)} - no longer in the project, its files were deleted");
+        foreach (var item in gone) result.AppendLine($"  REMOVED {Describe(item.Kind, item.GroupPath, item.Name)} - no longer in the project, its files were deleted");
         foreach (var note in _exportNotes) result.AppendLine($"  {note}");
         result.AppendLine($"Full item list: {summaryPath}");
         return result.ToString();
     });
-
-    // One parsed 'OK'/'FAILED'/'STALE' line from read_source_tree's _export_summary.txt (or a
-    // hand-trimmed copy/inline excerpt of it) - see write_source_tree. A plain class rather than a
-    // record: this project (net48) has no IsExternalInit polyfill for record/init-only support.
-    private sealed class ImportListItem
-    {
-        public ImportListItem(string deviceName, string kind, string groupPath, string itemName, bool ok)
-        {
-            DeviceName = deviceName;
-            Kind = kind;
-            GroupPath = groupPath;
-            ItemName = itemName;
-            Ok = ok;
-        }
-
-        public string DeviceName { get; }
-        public string Kind { get; }
-        public string GroupPath { get; }
-        public string ItemName { get; }
-        public bool Ok { get; }
-
-        public bool Is(string device, string kind, string name) =>
-            string.Equals(DeviceName, device, StringComparison.OrdinalIgnoreCase)
-            && Kind == kind
-            && string.Equals(ItemName, name, StringComparison.OrdinalIgnoreCase);
-    }
 
     [McpServerTool(Name = "write_source_tree")]
     [Description(@"Write a source tree from read_source_tree back into the connected project: every item whose files were edited since the last read, and every new file - a new block, UDT or tag table is created by adding its file in the right folder (the folder gives the group, the file name the item's name; for a new block or UDT start from an existing file of the same kind). Written items are read back into the tree afterward, so their files show what TIA Portal made of them. Not compiled - call compile_plc afterward, and after an FB interface change read the instance DBs again. Deleting a file does not delete the item in the project (use the delete_* tools).
@@ -701,7 +640,7 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
             items = changed;
         }
 
-        var classicHmis = new HashSet<string>(await _session.ListHmiClassicNamesAsync(), StringComparer.OrdinalIgnoreCase);
+        var projectDevices = await Devices(null);
         await _session.ClearHmiClassicScreenNumbersAsync();
 
         var conflicts = new List<(ImportListItem Item, string Reason)>();
@@ -729,40 +668,29 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
             var deviceName = deviceGroup.Key;
             var deviceDir = Path.Combine(sourceDirectory, Sanitize(deviceName));
             var deviceItems = deviceGroup.Where(items.Contains).ToList();
-            var isHmi = deviceGroup.All(i => i.Kind.StartsWith("HMI"));
+            var family = projectDevices.Where(d => string.Equals(d.Name, deviceName, StringComparison.OrdinalIgnoreCase)).Select(d => (DeviceFamily?)d.Family).FirstOrDefault();
+            var isHmi = family is DeviceFamily.HmiUnified or DeviceFamily.HmiClassic || (family == null && deviceGroup.All(i => i.Kind.StartsWith("HMI")));
             summary.AppendLine(isHmi ? $"=== {deviceName} (HMI) ===" : $"=== {deviceName} ===");
 
-            var logs = new List<(List<string> Created, List<string> Updated, List<string> Skipped, List<string> Failed)>();
-            var conflictLines = conflicts.Where(c => deviceGroup.Contains(c.Item)).Select(c => $"{Describe(c.Item.Kind, c.Item.GroupPath, c.Item.ItemName)}: {c.Reason}").ToList();
-            if (conflictLines.Count > 0) logs.Add((new List<string>(), new List<string>(), new List<string>(), conflictLines));
+            var logs = new List<WriteLog>();
+            var conflictLog = new WriteLog();
+            conflictLog.Failed.AddRange(conflicts.Where(c => deviceGroup.Contains(c.Item)).Select(c => $"{Describe(c.Item.Kind, c.Item.GroupPath, c.Item.ItemName)}: {c.Reason}"));
+            logs.Add(conflictLog);
 
-            // Dependency order: tags can be UDT-typed, and blocks reference both UDTs and tags -
-            // a block imported before what it references fails to import.
-            var udtItems = deviceItems.Where(i => i.Kind == "udt").ToList();
-            if (udtItems.Count > 0) logs.Add(await ImportTypes(deviceName, deviceDir, udtItems, createMissing, overwriteExisting, dryRun, written));
-
-            var tagTableItems = deviceItems.Where(i => i.Kind == "tag table").ToList();
-            if (tagTableItems.Count > 0) logs.Add(await ImportTagTables(deviceName, deviceDir, tagTableItems, createMissing, overwriteExisting, dryRun, workingCopy, written));
-
-            var blockItems = deviceItems.Where(i => i.Kind == "block").ToList();
-            if (blockItems.Count > 0) logs.Add(await ImportBlocks(deviceName, deviceDir, blockItems, createMissing, overwriteExisting, dryRun, written));
-
-            // After the blocks: the text lists' messages belong to the alarms the blocks define.
-            var alarmTextListItems = deviceItems.Where(i => i.Kind == AlarmTextListKind).ToList();
-            if (alarmTextListItems.Count > 0) logs.Add(await ImportAlarmTextLists(deviceName, deviceDir, alarmTextListItems, createMissing, overwriteExisting, dryRun, workingCopy, written));
-
-            if (classicHmis.Contains(deviceName))
+            // Each kind in the registry's write order, which puts what an item references first.
+            var kinds = family == null ? new List<ISourceKind>() : SourceKinds.Of(family.Value).ToList();
+            var context = new WriteContext(_session, deviceName, deviceDir, createMissing, overwriteExisting, dryRun, workingCopy, written);
+            foreach (var kind in kinds)
             {
-                var classicItems = deviceItems.Where(i => IsClassicTreeKind(i.Kind)).ToList();
-                if (classicItems.Count > 0) logs.Add(await ImportHmiClassic(deviceName, deviceDir, classicItems, createMissing, overwriteExisting, dryRun, written));
-                deviceItems = deviceItems.Where(i => !IsClassicTreeKind(i.Kind)).ToList();
+                var kindItems = deviceItems.Where(i => i.Kind == kind.Name).ToList();
+                if (kindItems.Count > 0) logs.Add(await kind.Write(context, kindItems));
             }
 
-            var hmiTagTableItems = deviceItems.Where(i => i.Kind == "HMI tag table").ToList();
-            if (hmiTagTableItems.Count > 0) logs.Add(await ImportHmiTagTables(deviceName, deviceDir, hmiTagTableItems, createMissing, overwriteExisting, dryRun, workingCopy, written));
-
-            var hmiAlarmItems = deviceItems.Where(i => HmiAlarmKinds.Contains(i.Kind)).ToList();
-            if (hmiAlarmItems.Count > 0) logs.Add(await ImportHmiAlarms(deviceName, deviceDir, hmiAlarmItems, createMissing, overwriteExisting, dryRun, written));
+            var unknown = new WriteLog();
+            unknown.Failed.AddRange(deviceItems.Where(i => !kinds.Any(k => k.Name == i.Kind)).Select(i => family == null
+                ? $"{Describe(i.Kind, i.GroupPath, i.ItemName)}: the project has no PLC or HMI software named '{deviceName}'"
+                : $"{Describe(i.Kind, i.GroupPath, i.ItemName)}: a {i.Kind} can't be written to {(family == DeviceFamily.Plc ? "a PLC" : family == DeviceFamily.HmiClassic ? "a classic WinCC HMI" : "a WinCC Unified HMI")}"));
+            logs.Add(unknown);
 
             foreach (var log in logs)
             {
@@ -832,7 +760,8 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
             : DiskState.Unchanged;
     }
 
-    private static readonly string[] SourceExtensions = { ".s7dcl", ".s7res", ".graph.il", ".awl", ".csv", ".xml" };
+    // Every writable extension, including the .s7res that goes with a .s7dcl.
+    private static readonly string[] SourceExtensions = SourceKinds.All.SelectMany(k => k.Extensions).Append(".s7res").Distinct().ToArray();
 
     // Source files in the tree that no read put there: new items to create. Kind and group path
     // follow from the folder (see ItemDir), the name from the file name.
@@ -844,35 +773,26 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
             var dirName = Path.GetFileName(deviceDir);
             var device = manifest.Items.Select(i => i.Device).FirstOrDefault(d => Sanitize(d) == dirName) ?? dirName;
 
-            void Scan(string section, string kind, params string[] extensions)
+            // Two kinds can share a section (classic and Unified HMI tag tables): a file is new for
+            // the first kind it fits.
+            foreach (var kind in SourceKinds.All)
             {
-                var sectionDir = Path.Combine(deviceDir, section);
-                if (!Directory.Exists(sectionDir)) return;
+                var sectionDir = Path.Combine(deviceDir, kind.Section);
+                if (!Directory.Exists(sectionDir)) continue;
                 foreach (var file in Directory.GetFiles(sectionDir, "*", SearchOption.AllDirectories))
                 {
                     var fileName = Path.GetFileName(file);
-                    var ext = extensions.FirstOrDefault(e => fileName.EndsWith(e, StringComparison.OrdinalIgnoreCase));
+                    var ext = kind.Extensions.FirstOrDefault(e => fileName.EndsWith(e, StringComparison.OrdinalIgnoreCase));
                     if (ext == null || SourceTreeManifest.IsReadOnlyCompanion(fileName)) continue;
 
-                    var name = fileName.Substring(0, fileName.Length - ext.Length);
+                    var stem = fileName.Substring(0, fileName.Length - ext.Length);
                     var relDir = Path.GetDirectoryName(file)!.Substring(sectionDir.Length).Trim(Path.DirectorySeparatorChar).Replace(Path.DirectorySeparatorChar, '/');
-                    if (manifest.Find(device, kind, name) == null && !found.Any(i => i.Is(device, kind, name)))
-                        found.Add(new ImportListItem(device, kind, relDir, name, true));
-                }
-            }
+                    if (kind.FixedName != null && (relDir != "" || !string.Equals(stem, kind.FixedName, StringComparison.OrdinalIgnoreCase))) continue;
 
-            Scan("Program blocks", "block", ".s7dcl", ".graph.il", ".awl");
-            Scan("PLC data types", "udt", ".s7dcl");
-            Scan("PLC tags", "tag table", ".csv");
-            Scan("PLC alarm text lists", "alarm text list", ".csv");
-            Scan("HMI tags", "HMI tag table", ".csv", ".xml");
-            Scan("Text lists", "HMI text list", ".xml");
-            Scan("Screen templates", "HMI screen template", ".xml");
-            Scan("Pop-up screens", "HMI pop-up screen", ".xml");
-            Scan("Screens", "HMI screen", ".xml");
-            foreach (var kind in HmiAlarmKinds.Where(k => File.Exists(Path.Combine(deviceDir, "HMI alarms", ItemStem(k, "") + ".csv"))))
-            {
-                if (manifest.Find(device, kind, "") == null) found.Add(new ImportListItem(device, kind, "", "", true));
+                    var name = kind.FixedName == null ? stem : "";
+                    if (manifest.Find(device, kind.Name, name) == null && !found.Any(i => i.Is(device, kind.Name, name)))
+                        found.Add(new ImportListItem(device, kind.Name, relDir, name, true));
+                }
             }
         }
         return found;
@@ -904,453 +824,6 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
         return conflicts;
     }
 
-    private async Task<(List<string> Created, List<string> Updated, List<string> Skipped, List<string> Failed)> ImportBlocks(
-        string plcName, string plcDir, List<ImportListItem> items, bool createMissing, bool overwriteExisting, bool dryRun, List<ImportListItem> written)
-    {
-        var created = new List<string>();
-        var updated = new List<string>();
-        var skipped = new List<string>();
-        var failed = new List<string>();
-
-        var existingBlocks = (await _session.ListBlocksAsync(plcName)).Select(b => b.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var ensuredGroups = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var writes = new List<PendingWrite>();
-        string? graphTemplateName = null;
-        var graphTemplateSearched = false;
-
-        foreach (var item in items)
-        {
-            var label = string.IsNullOrEmpty(item.GroupPath) ? item.ItemName : $"{item.GroupPath}/{item.ItemName}";
-            var dir = GroupDir(plcDir, "Program blocks", item.GroupPath);
-            var (docs, error) = ReadBlockDocuments(dir, item.ItemName);
-            if (docs == null)
-            {
-                failed.Add($"block '{label}': {error}");
-                continue;
-            }
-
-            var exists = existingBlocks.Contains(item.ItemName);
-            if (exists)
-            {
-                if (!overwriteExisting) { skipped.Add($"block '{label}' - already exists, overwriteExisting=false"); continue; }
-                if (dryRun) { updated.Add($"block '{label}' (dry run)"); continue; }
-
-                var name = item.ItemName;
-                writes.Add(new PendingWrite(item, $"block '{label}'", docs, false, () => _session.WriteBlockAsync(plcName, name, docs)));
-                continue;
-            }
-
-            if (!createMissing) { skipped.Add($"block '{label}' - does not exist, createMissing=false"); continue; }
-
-            var isGraph = docs.Count == 1 && docs[0].FileName.EndsWith(".graph.il", StringComparison.OrdinalIgnoreCase);
-            if (isGraph)
-            {
-                if (!graphTemplateSearched)
-                {
-                    graphTemplateName = (await _session.ListBlocksAsync(plcName)).FirstOrDefault(b => b.Language == "GRAPH")?.Name;
-                    graphTemplateSearched = true;
-                }
-                if (graphTemplateName == null)
-                {
-                    skipped.Add($"block '{label}' - no existing GRAPH block in PLC '{plcName}' to use as a clone template; create one manually first");
-                    continue;
-                }
-                if (dryRun) { created.Add($"block '{label}' (dry run, GRAPH via template '{graphTemplateName}')"); continue; }
-
-                var (graphGroup, graphName, template) = (item.GroupPath, item.ItemName, graphTemplateName);
-                writes.Add(new PendingWrite(item, $"block '{label}' (GRAPH, template '{template}')", docs, true,
-                    () => _session.CreateGraphBlockAsync(plcName, graphGroup, graphName, template, docs[0].Content)));
-                continue;
-            }
-
-            if (dryRun) { created.Add($"block '{label}' (dry run)"); continue; }
-
-            await EnsureBlockGroupPath(plcName, item.GroupPath, ensuredGroups);
-            var (groupPath, blockName) = (item.GroupPath, item.ItemName);
-            // Whole-block STL can't go through ImportFromDocuments - it goes through 'Generate blocks from source' (CreateStlBlock).
-            var isStl = docs.Count == 1 && docs[0].FileName.EndsWith(".awl", StringComparison.OrdinalIgnoreCase);
-            writes.Add(new PendingWrite(item, $"block '{label}'", docs, true, isStl
-                ? () => _session.CreateStlBlockAsync(plcName, groupPath, blockName, docs)
-                : () => _session.CreateBlockAsync(plcName, groupPath, blockName, docs, checkExisting: false)));
-        }
-
-        await WriteInDependencyOrder(plcName, writes, created, updated, failed, written, compileBetweenLayers: false);
-        return (created, updated, skipped, failed);
-    }
-
-    private async Task<(List<string> Created, List<string> Updated, List<string> Skipped, List<string> Failed)> ImportTypes(
-        string plcName, string plcDir, List<ImportListItem> items, bool createMissing, bool overwriteExisting, bool dryRun, List<ImportListItem> written)
-    {
-        var created = new List<string>();
-        var updated = new List<string>();
-        var skipped = new List<string>();
-        var failed = new List<string>();
-
-        var existingTypes = (await _session.ListPlcTypesAsync(plcName)).Select(t => t.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var ensuredGroups = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var writes = new List<PendingWrite>();
-
-        foreach (var item in items)
-        {
-            var label = string.IsNullOrEmpty(item.GroupPath) ? item.ItemName : $"{item.GroupPath}/{item.ItemName}";
-            var dir = GroupDir(plcDir, "PLC data types", item.GroupPath);
-            var sanitizedName = Sanitize(item.ItemName);
-            var file = Path.Combine(dir, sanitizedName + ".s7dcl");
-            if (!File.Exists(file)) file = Path.Combine(dir, sanitizedName + ".txt");
-            if (!File.Exists(file)) { failed.Add($"udt '{label}': no source file found in {dir}"); continue; }
-
-            var resFile = Path.Combine(dir, sanitizedName + ".s7res");
-            var docs = UdtDocuments(item.ItemName, File.ReadAllText(file), File.Exists(resFile) ? File.ReadAllText(resFile) : null);
-            var exists = existingTypes.Contains(item.ItemName);
-            if (exists)
-            {
-                if (!overwriteExisting) { skipped.Add($"udt '{label}' - already exists, overwriteExisting=false"); continue; }
-                if (dryRun) { updated.Add($"udt '{label}' (dry run)"); continue; }
-
-                var name = item.ItemName;
-                writes.Add(new PendingWrite(item, $"udt '{label}'", docs, false, () => _session.WriteUdtAsync(plcName, name, docs)));
-            }
-            else
-            {
-                if (!createMissing) { skipped.Add($"udt '{label}' - does not exist, createMissing=false"); continue; }
-                if (dryRun) { created.Add($"udt '{label}' (dry run)"); continue; }
-
-                await EnsureTypeGroupPath(plcName, item.GroupPath, ensuredGroups);
-                var (groupPath, typeName) = (item.GroupPath, item.ItemName);
-                writes.Add(new PendingWrite(item, $"udt '{label}'", docs, true, () => _session.CreateUdtAsync(plcName, groupPath, typeName, docs)));
-            }
-        }
-
-        await WriteInDependencyOrder(plcName, writes, created, updated, failed, written, compileBetweenLayers: true);
-        return (created, updated, skipped, failed);
-    }
-
-    // One UDT or block write (update or create) decided by ImportTypes/ImportBlocks. A plain
-    // class rather than a record - see ImportListItem.
-    private sealed class PendingWrite
-    {
-        public PendingWrite(ImportListItem item, string label, List<BlockDocument> docs, bool isCreate, Func<Task<ImportResult>> write)
-        {
-            Item = item; Label = label; Docs = docs; IsCreate = isCreate; Write = write;
-        }
-        public ImportListItem Item { get; }
-        public string Name => Item.ItemName;
-        public string Label { get; }
-        public List<BlockDocument> Docs { get; }
-        public bool IsCreate { get; }
-        public Func<Task<ImportResult>> Write { get; }
-    }
-
-    // Writes UDTs/blocks after what they reference: an import that references something not
-    // imported yet fails ("Dependent object ... not found") or, for a UDT nesting another UDT,
-    // succeeds but silently drops the nested start values unless the nested UDT is also compiled
-    // - hence compileBetweenLayers for UDTs. Blocks only need the order (a full round trip of a
-    // ~500-block PLC came back identical without compiles between block layers). That gives UDTs in nesting
-    // order, and blocks as global DBs/FBs before the FBs that call them and the instance DBs on
-    // them. References are read from the source text (see DependencyLayers), so a create that
-    // still fails is retried after a compile, as long as a pass creates something.
-    private async Task WriteInDependencyOrder(string plcName, List<PendingWrite> writes, List<string> created, List<string> updated, List<string> failed, List<ImportListItem> written, bool compileBetweenLayers)
-    {
-        var lastError = new Dictionary<PendingWrite, string>();
-        var retry = new List<PendingWrite>();
-        var layers = DependencyLayers(writes);
-        for (var i = 0; i < layers.Count; i++)
-        {
-            if (i > 0 && compileBetweenLayers) await _session.CompileAsync(plcName);
-            foreach (var write in layers[i])
-            {
-                var result = await write.Write();
-                if (result.Success) { (write.IsCreate ? created : updated).Add(write.Label); written.Add(write.Item); }
-                else if (write.IsCreate) { retry.Add(write); lastError[write] = string.Join(" | ", result.Messages); }
-                else failed.Add($"{write.Label}: {string.Join(" | ", result.Messages)}");
-            }
-        }
-
-        while (retry.Count > 0)
-        {
-            await _session.CompileAsync(plcName);
-            var stillFailing = new List<PendingWrite>();
-            foreach (var write in retry)
-            {
-                var result = await write.Write();
-                if (result.Success) { created.Add(write.Label); written.Add(write.Item); }
-                else { stillFailing.Add(write); lastError[write] = string.Join(" | ", result.Messages); }
-            }
-            if (stillFailing.Count == retry.Count) break;
-            retry = stillFailing;
-        }
-        foreach (var write in retry) failed.Add($"{write.Label}: {lastError[write]}");
-    }
-
-    private static readonly Regex IdentifierToken = new("\"([^\"]+)\"|[A-Za-z_][A-Za-z0-9_]*", RegexOptions.Compiled);
-
-    // Groups writes into layers where each item only references items of earlier layers. A
-    // reference is any identifier in the item's source (not its .s7res texts) that names another
-    // item in the same set - e.g. "DATA_BLOCK "x" : FB_y", "member : _.UDT_z". A cycle, or a name
-    // that happens to match a variable, ends up in the last layer, where the retry in
-    // WriteInDependencyOrder still covers it.
-    private static List<List<PendingWrite>> DependencyLayers(List<PendingWrite> writes)
-    {
-        var names = new HashSet<string>(writes.Select(w => w.Name), StringComparer.OrdinalIgnoreCase);
-        var dependencies = writes.ToDictionary(w => w, w => IdentifierToken
-            .Matches(string.Join("\n", w.Docs.Where(d => !d.FileName.EndsWith(".s7res", StringComparison.OrdinalIgnoreCase)).Select(d => d.Content)))
-            .Cast<Match>()
-            .Select(m => m.Groups[1].Success ? m.Groups[1].Value : m.Value)
-            .Where(t => names.Contains(t) && !string.Equals(t, w.Name, StringComparison.OrdinalIgnoreCase))
-            .ToHashSet(StringComparer.OrdinalIgnoreCase));
-
-        var layers = new List<List<PendingWrite>>();
-        var placed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var remaining = writes;
-        while (remaining.Count > 0)
-        {
-            var layer = remaining.Where(w => dependencies[w].All(placed.Contains)).ToList();
-            if (layer.Count == 0) layer = remaining;
-            layers.Add(layer);
-            foreach (var w in layer) placed.Add(w.Name);
-            remaining = remaining.Except(layer).ToList();
-        }
-        return layers;
-    }
-
-    // deleteMissing: delete tags of an existing table that its CSV no longer has - for a working copy,
-    // where the CSV is the whole table as read and a removed row means a deleted tag.
-    private async Task<(List<string> Created, List<string> Updated, List<string> Skipped, List<string> Failed)> ImportTagTables(
-        string plcName, string plcDir, List<ImportListItem> items, bool createMissing, bool overwriteExisting, bool dryRun, bool deleteMissing, List<ImportListItem> written)
-    {
-        var created = new List<string>();
-        var updated = new List<string>();
-        var skipped = new List<string>();
-        var failed = new List<string>();
-
-        var existingTables = (await _session.ListTagTablesAsync(plcName)).Select(t => t.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var ensuredGroups = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var item in items)
-        {
-            var label = string.IsNullOrEmpty(item.GroupPath) ? item.ItemName : $"{item.GroupPath}/{item.ItemName}";
-            var dir = GroupDir(plcDir, "PLC tags", item.GroupPath);
-            var file = Path.Combine(dir, Sanitize(item.ItemName) + ".csv");
-            if (!File.Exists(file)) { failed.Add($"tag table '{label}': no .csv file found at {file}"); continue; }
-
-            TagSpec[] tags;
-            try { tags = TagTableCsv.Parse(File.ReadAllText(file)); }
-            catch (FormatException ex) { failed.Add($"tag table '{label}': {ex.Message}"); continue; }
-
-            var exists = existingTables.Contains(item.ItemName);
-            if (exists)
-            {
-                if (!overwriteExisting) { skipped.Add($"tag table '{label}' - already exists, overwriteExisting=false"); continue; }
-                if (dryRun) { updated.Add($"tag table '{label}' (dry run, {tags.Length} tag(s))"); continue; }
-
-                var result = await _session.WriteTagTableAsync(plcName, item.ItemName, tags, deleteMissing);
-                if (result.Success) { updated.Add($"tag table '{label}' ({tags.Length} tag(s){DeletedTags(result)})"); written.Add(item); }
-                else failed.Add($"tag table '{label}': {string.Join(" | ", result.Messages)}");
-            }
-            else
-            {
-                if (!createMissing) { skipped.Add($"tag table '{label}' - does not exist, createMissing=false"); continue; }
-                if (dryRun) { created.Add($"tag table '{label}' (dry run, {tags.Length} tag(s))"); continue; }
-
-                await EnsureTagTableGroupPath(plcName, item.GroupPath, ensuredGroups);
-                var createResult = await _session.CreateTagTableAsync(plcName, item.GroupPath, item.ItemName);
-                if (!createResult.Success) { failed.Add($"tag table '{label}': {createResult.Error}"); continue; }
-
-                var writeResult = await _session.WriteTagTableAsync(plcName, item.ItemName, tags);
-                if (writeResult.Success) { created.Add($"tag table '{label}' ({tags.Length} tag(s))"); written.Add(item); }
-                else failed.Add($"tag table '{label}': created empty, but writing tags failed: {string.Join(" | ", writeResult.Messages)}");
-            }
-        }
-
-        return (created, updated, skipped, failed);
-    }
-
-    private async Task<(List<string> Created, List<string> Updated, List<string> Skipped, List<string> Failed)> ImportHmiTagTables(
-        string hmiName, string hmiDir, List<ImportListItem> items, bool createMissing, bool overwriteExisting, bool dryRun, bool deleteMissing, List<ImportListItem> written)
-    {
-        var created = new List<string>();
-        var updated = new List<string>();
-        var skipped = new List<string>();
-        var failed = new List<string>();
-
-        var existingTables = (await _session.ListHmiTagTablesAsync(hmiName)).Select(t => t.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var ensuredGroups = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var item in items)
-        {
-            var label = string.IsNullOrEmpty(item.GroupPath) ? item.ItemName : $"{item.GroupPath}/{item.ItemName}";
-            var dir = GroupDir(hmiDir, "HMI tags", item.GroupPath);
-            var file = Path.Combine(dir, Sanitize(item.ItemName) + ".csv");
-            if (!File.Exists(file)) { failed.Add($"HMI tag table '{label}': no .csv file found at {file}"); continue; }
-
-            HmiTagSpec[] tags;
-            try { tags = HmiTagTableCsv.Parse(File.ReadAllText(file)); }
-            catch (FormatException ex) { failed.Add($"HMI tag table '{label}': {ex.Message}"); continue; }
-
-            var exists = existingTables.Contains(item.ItemName);
-            if (exists)
-            {
-                if (!overwriteExisting) { skipped.Add($"HMI tag table '{label}' - already exists, overwriteExisting=false"); continue; }
-                if (dryRun) { updated.Add($"HMI tag table '{label}' (dry run, {tags.Length} tag(s))"); continue; }
-
-                var result = await _session.WriteHmiTagTableAsync(hmiName, item.ItemName, tags, deleteMissing);
-                if (result.Success) { updated.Add($"HMI tag table '{label}' ({tags.Length} tag(s){DeletedTags(result)})"); written.Add(item); }
-                else failed.Add($"HMI tag table '{label}': {string.Join(" | ", result.Messages)}");
-            }
-            else
-            {
-                if (!createMissing) { skipped.Add($"HMI tag table '{label}' - does not exist, createMissing=false"); continue; }
-                if (dryRun) { created.Add($"HMI tag table '{label}' (dry run, {tags.Length} tag(s))"); continue; }
-
-                await EnsureHmiTagTableGroupPath(hmiName, item.GroupPath, ensuredGroups);
-                var createResult = await _session.CreateHmiTagTableAsync(hmiName, item.GroupPath, item.ItemName);
-                if (!createResult.Success) { failed.Add($"HMI tag table '{label}': {createResult.Error}"); continue; }
-
-                var writeResult = await _session.WriteHmiTagTableAsync(hmiName, item.ItemName, tags);
-                if (writeResult.Success) { created.Add($"HMI tag table '{label}' ({tags.Length} tag(s))"); written.Add(item); }
-                else failed.Add($"HMI tag table '{label}': created empty, but writing tags failed: {string.Join(" | ", writeResult.Messages)}");
-            }
-        }
-
-        return (created, updated, skipped, failed);
-    }
-
-    private static string DeletedTags(WriteTagsResult result)
-    {
-        var deleted = result.Messages.Where(m => m.StartsWith("Deleted '")).Select(m => m.Substring("Deleted ".Length).TrimEnd('.')).ToList();
-        return deleted.Count == 0 ? "" : $", deleted {string.Join(", ", deleted)}";
-    }
-
-    // Alarms/alarm classes are always upsert-by-name (see TiaConnection.WriteHmiAlarm/WriteHmiAlarmClass),
-    // so createMissing/overwriteExisting are applied per-row here rather than per-CSV-file, unlike
-    // every other section where one list item is one write call.
-    private async Task<(List<string> Created, List<string> Updated, List<string> Skipped, List<string> Failed)> ImportHmiAlarms(
-        string hmiName, string hmiDir, List<ImportListItem> items, bool createMissing, bool overwriteExisting, bool dryRun, List<ImportListItem> written)
-    {
-        var created = new List<string>();
-        var updated = new List<string>();
-        var skipped = new List<string>();
-        var failed = new List<string>();
-        var dir = Path.Combine(hmiDir, "HMI alarms");
-
-        foreach (var item in items)
-        {
-            // A file counts as written only if every row was - see write_source_tree's refresh.
-            var failedBefore = failed.Count;
-            var itemName = item.Kind.Substring("HMI ".Length); // "DiscreteAlarms" / "AnalogAlarms" / "AlarmClasses"
-            var file = Path.Combine(dir, itemName + ".csv");
-            if (!File.Exists(file)) { failed.Add($"HMI {itemName}: no .csv file found at {file}"); continue; }
-
-            if (itemName == "AlarmClasses")
-            {
-                HmiAlarmClassSpec[] classes;
-                try { classes = HmiAlarmsCsv.ParseClasses(File.ReadAllText(file)); }
-                catch (FormatException ex) { failed.Add($"HMI {itemName}: {ex.Message}"); continue; }
-
-                var existing = (await _session.ListHmiAlarmClassesAsync(hmiName)).Select(c => c.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
-                foreach (var spec in classes)
-                {
-                    var name = spec.Name;
-                    var exists = existing.Contains(name);
-                    if (exists && !overwriteExisting) { skipped.Add($"HMI alarm class '{name}' - already exists, overwriteExisting=false"); continue; }
-                    if (!exists && !createMissing) { skipped.Add($"HMI alarm class '{name}' - does not exist, createMissing=false"); continue; }
-                    if (dryRun) { (exists ? updated : created).Add($"HMI alarm class '{name}' (dry run)"); continue; }
-
-                    var result = await _session.WriteHmiAlarmClassAsync(hmiName, spec);
-                    if (result.Success) (exists ? updated : created).Add($"HMI alarm class '{name}'");
-                    else failed.Add($"HMI alarm class '{name}': {result.Error}");
-                }
-                if (!dryRun && failed.Count == failedBefore) written.Add(item);
-                continue;
-            }
-
-            var type = itemName == "DiscreteAlarms" ? "Discrete" : "Analog";
-            HmiAlarmSpec[] alarms;
-            try { alarms = HmiAlarmsCsv.ParseAlarms(File.ReadAllText(file), type); }
-            catch (FormatException ex) { failed.Add($"HMI {itemName}: {ex.Message}"); continue; }
-
-            var existingAlarms = (await _session.ListHmiAlarmsAsync(hmiName, type)).Select(a => a.Name).ToHashSet(StringComparer.OrdinalIgnoreCase);
-            foreach (var spec in alarms)
-            {
-                var name = spec.Name;
-                var exists = existingAlarms.Contains(name);
-                if (exists && !overwriteExisting) { skipped.Add($"HMI alarm '{name}' - already exists, overwriteExisting=false"); continue; }
-                if (!exists && !createMissing) { skipped.Add($"HMI alarm '{name}' - does not exist, createMissing=false"); continue; }
-                if (dryRun) { (exists ? updated : created).Add($"HMI alarm '{name}' (dry run)"); continue; }
-
-                var result = await _session.WriteHmiAlarmAsync(hmiName, spec);
-                if (result.Success) (exists ? updated : created).Add($"HMI alarm '{name}'");
-                else failed.Add($"HMI alarm '{name}': {result.Error}");
-            }
-            if (!dryRun && failed.Count == failedBefore) written.Add(item);
-        }
-
-        return (created, updated, skipped, failed);
-    }
-
-    // Locates the on-disk source file(s) read_source_tree wrote for one block and packages them as the
-    // BlockDocument(s) WriteBlock/CreateBlock expect - mirroring ExportBlocks' own
-    // extension priority (GRAPH's '.graph.il', whole-block STL's '.awl', else the normal
-    // '.s7dcl'[+'.s7res'] pair). '.interface.txt' and '.stl-networks.xml' are read-only companions
-    // (see read_source_tree) and are never picked up here.
-    private static (List<BlockDocument>? Docs, string? Error) ReadBlockDocuments(string dir, string blockName)
-    {
-        if (!Directory.Exists(dir)) return (null, $"directory not found: {dir}");
-        var sanitizedName = Sanitize(blockName);
-
-        var graphFile = Path.Combine(dir, sanitizedName + ".graph.il");
-        if (File.Exists(graphFile))
-            return (new List<BlockDocument> { new($"{blockName}.graph.il", File.ReadAllText(graphFile)) }, null);
-
-        var awlFile = Path.Combine(dir, sanitizedName + ".awl");
-        if (File.Exists(awlFile))
-            return (new List<BlockDocument> { new($"{blockName}.awl", File.ReadAllText(awlFile)) }, null);
-
-        var dclFile = Path.Combine(dir, sanitizedName + ".s7dcl");
-        if (!File.Exists(dclFile))
-        {
-            var txtFile = Path.Combine(dir, sanitizedName + ".txt");
-            if (File.Exists(txtFile))
-                return (new List<BlockDocument> { new($"{blockName}.s7dcl", File.ReadAllText(txtFile)) }, null);
-            return (null, $"no source file found in '{dir}' (expected {sanitizedName}.s7dcl, .graph.il, or .awl)");
-        }
-
-        var docs = new List<BlockDocument> { new($"{blockName}.s7dcl", File.ReadAllText(dclFile)) };
-        var resFile = Path.Combine(dir, sanitizedName + ".s7res");
-        if (File.Exists(resFile)) docs.Add(new BlockDocument($"{blockName}.s7res", File.ReadAllText(resFile)));
-        return (docs, null);
-    }
-
-    // Best-effort recursive group creation so the create calls' "group must already
-    // exist" requirement doesn't block restoring a full
-    // tree into an empty/new PLC or HMI. Failures (including "already exists") are ignored here - a
-    // genuine problem still surfaces from the subsequent create call itself right after this runs.
-    // ensured: group paths already handled in this import, so each folder is created (or found to
-    // exist - a create that throws, which is slow over Openness) once rather than once per item.
-    private static async Task EnsureGroupPath(string groupPath, Func<string, string, Task> createGroup, ISet<string> ensured)
-    {
-        if (string.IsNullOrEmpty(groupPath)) return;
-        var current = "";
-        foreach (var segment in groupPath.Split('/'))
-        {
-            var path = string.IsNullOrEmpty(current) ? segment : $"{current}/{segment}";
-            if (ensured.Add(path)) await createGroup(current, segment);
-            current = path;
-        }
-    }
-
-    private Task EnsureBlockGroupPath(string plcName, string groupPath, ISet<string> ensured) =>
-        EnsureGroupPath(groupPath, (parent, segment) => _session.CreateBlockGroupAsync(plcName, parent, segment), ensured);
-
-    private Task EnsureTypeGroupPath(string plcName, string groupPath, ISet<string> ensured) =>
-        EnsureGroupPath(groupPath, (parent, segment) => _session.CreateTypeGroupAsync(plcName, parent, segment), ensured);
-
-    private Task EnsureTagTableGroupPath(string plcName, string groupPath, ISet<string> ensured) =>
-        EnsureGroupPath(groupPath, (parent, segment) => _session.CreateTagTableGroupAsync(plcName, parent, segment), ensured);
-
-    private Task EnsureHmiTagTableGroupPath(string hmiName, string groupPath, ISet<string> ensured) =>
-        EnsureGroupPath(groupPath, (parent, segment) => _session.CreateHmiTagTableGroupAsync(hmiName, parent, segment), ensured);
-
     // Parses an item list - _export_summary.txt or list_project output, or a trimmed copy/excerpt of
     // either - into importable items; see write_source_tree. The status column is optional (a line
     // without one counts as OK). Unrecognized lines (headers, blank lines, the trailing 'Done: ...'
@@ -1373,7 +846,7 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
                 continue;
             }
 
-            var itemMatch = ListedItem.Match(trimmed);
+            var itemMatch = SourceKinds.ListedItem.Match(trimmed);
             if (!itemMatch.Success || currentDevice == null) continue;
 
             var ok = itemMatch.Groups["status"].Value is "" or "OK";
@@ -1392,134 +865,28 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
         "Expected lines as list_project or _export_summary.txt show them, under their software's header, e.g.:\n" +
         "=== PLC_1 ===\n  block 'Group/Main'\n  OK     udt 'Types/UDT_Motor'\n=== HMI_1 (HMI) ===\n  HMI tag table 'Tags'\n  HMI DiscreteAlarms";
 
-    // One item as exported from TIA Portal: its files (root-relative path, content, whether it is
-    // written with a UTF-8 BOM), or why it couldn't be exported. HMI alarms are three fixed items
-    // per HMI with Kind 'HMI DiscreteAlarms'/'HMI AnalogAlarms'/'HMI AlarmClasses' and no name -
-    // alarms and alarm classes have no folder/group concept in Openness.
-    private sealed class ExportedItem
-    {
-        public ExportedItem(string device, string kind, string groupPath, string name, List<(string Path, string Content, bool Bom)> files, string? error)
-        {
-            Device = device; Kind = kind; GroupPath = groupPath; Name = name; Files = files; Error = error;
-        }
-        public string Device { get; }
-        public string Kind { get; }
-        public string GroupPath { get; }
-        public string Name { get; }
-        public List<(string Path, string Content, bool Bom)> Files { get; }
-        public string? Error { get; }
-        public bool Ok => Error == null;
-    }
-
-    private static readonly string[] HmiAlarmKinds = { "HMI DiscreteAlarms", "HMI AnalogAlarms", "HMI AlarmClasses" };
-
     // Exports every item include (device, kind, group path, name) selects - all of them when it's
     // null - from every PLC and HMI, or only deviceName's. Also returns the devices it went
     // through, so a caller can tell which manifest items it would have seen if they still existed.
     private async Task<(List<ExportedItem> Items, List<string> Devices)> ExportItems(Func<string, string, string, string, bool>? include, string? deviceName)
     {
         var items = new List<ExportedItem>();
-        var devices = new List<string>();
+        var devices = await Devices(deviceName);
         _exportNotes.Clear();
-        bool Includes(string device, string kind, string groupPath, string name) => include == null || include(device, kind, groupPath, name);
-        bool IsSelectedDevice(string device) => deviceName == null || string.Equals(device, deviceName, StringComparison.OrdinalIgnoreCase);
-
-        foreach (var plc in (await _session.ListDevicesAsync()).Select(d => d.PlcSoftwareName).OfType<string>().Where(IsSelectedDevice))
+        foreach (var (family, device) in devices)
         {
-            devices.Add(plc);
-            foreach (var (b, result) in await _session.ReadAllBlocksAsync(plc, (g, n) => Includes(plc, "block", g, n)))
-                items.Add(FromDocuments(plc, "block", b.GroupPath, b.Name, result));
-            foreach (var (t, result) in await _session.ReadAllTagTablesAsync(plc, (g, n) => Includes(plc, "tag table", g, n)))
-                items.Add(FromCsv(plc, "tag table", t.GroupPath, t.Name, result.Success ? TagTableCsv.Format(result.Tags) : null, result.Error));
-            foreach (var (t, result) in await _session.ReadAllUdtsAsync(plc, (g, n) => Includes(plc, "udt", g, n)))
-                items.Add(FromDocuments(plc, "udt", t.GroupPath, t.Name, result));
-            await ExportPlcAlarmTextLists(plc, Includes, items);
-        }
+            foreach (var kind in SourceKinds.Of(family))
+                await kind.Export(_session, device, (g, n) => include == null || include(device, kind.Name, g, n), items);
 
-        foreach (var hmi in (await _session.ListHmiDevicesAsync()).Select(h => h.HmiSoftwareName).Where(IsSelectedDevice))
-        {
-            devices.Add(hmi);
-            foreach (var table in (await _session.ListHmiTagTablesAsync(hmi)).Where(t => Includes(hmi, "HMI tag table", t.GroupPath, t.Name)))
+            if (family == DeviceFamily.HmiClassic && include == null)
             {
-                try
-                {
-                    var result = await _session.ReadHmiTagTableAsync(hmi, table.Name);
-                    items.Add(FromCsv(hmi, "HMI tag table", table.GroupPath, table.Name, result.Success ? HmiTagTableCsv.Format(result.Tags) : null, result.Error));
-                }
-                catch (Exception ex)
-                {
-                    items.Add(FromCsv(hmi, "HMI tag table", table.GroupPath, table.Name, null, ex.Message));
-                }
-            }
-
-            foreach (var kind in HmiAlarmKinds.Where(k => Includes(hmi, k, "", "")))
-            {
-                try
-                {
-                    var csv = kind == "HMI AlarmClasses"
-                        ? HmiAlarmsCsv.FormatClasses(await _session.ListHmiAlarmClassesAsync(hmi))
-                        : HmiAlarmsCsv.FormatAlarms(await _session.ListHmiAlarmsAsync(hmi, kind == "HMI DiscreteAlarms" ? "Discrete" : "Analog"));
-                    items.Add(FromCsv(hmi, kind, "", "", csv, null));
-                }
-                catch (Exception ex)
-                {
-                    items.Add(FromCsv(hmi, kind, "", "", null, ex.Message));
-                }
+                var graphicLists = await _session.CountHmiClassicGraphicListsAsync(device);
+                if (graphicLists > 0)
+                    _exportNotes.Add($"SKIPPED {graphicLists} graphic list(s) of '{device}' - exporting a classic graphic list crashes TIA Portal V21 (InvalidCastException in UpdateOpenLinks)");
             }
         }
 
-        foreach (var hmi in (await _session.ListHmiClassicNamesAsync()).Where(IsSelectedDevice))
-        {
-            devices.Add(hmi);
-            await ExportHmiClassic(hmi, Includes, include == null, items);
-        }
-
-        return (items, devices);
-    }
-
-    private static ExportedItem FromDocuments(string device, string kind, string groupPath, string name, ExportResult result)
-    {
-        var dir = ItemDir(device, kind, groupPath);
-        var files = result.Documents.Select(d => ($"{dir}/{Sanitize(EnsureExtension(d.FileName))}", d.Content, false)).ToList();
-        return new ExportedItem(device, kind, groupPath, name, files, result.Success ? null : result.Error ?? "export failed");
-    }
-
-    // CSV gets a UTF-8 BOM so Excel auto-detects the encoding and opening the file directly
-    // (double-click) renders non-ASCII comment/tag text correctly instead of mangling it.
-    private static ExportedItem FromCsv(string device, string kind, string groupPath, string name, string? csv, string? error)
-    {
-        var files = csv == null
-            ? new List<(string, string, bool)>()
-            : new List<(string, string, bool)> { ($"{ItemDir(device, kind, groupPath)}/{Sanitize(ItemStem(kind, name))}.csv", csv, true) };
-        return new ExportedItem(device, kind, groupPath, name, files, csv == null ? error ?? "export failed" : null);
-    }
-
-    private static string SectionOf(string kind) => kind switch
-    {
-        "block" => "Program blocks",
-        "udt" => "PLC data types",
-        "tag table" => "PLC tags",
-        "HMI tag table" => "HMI tags",
-        "alarm text list" => "PLC alarm text lists",
-        "HMI screen" => "Screens",
-        "HMI screen template" => "Screen templates",
-        "HMI pop-up screen" => "Pop-up screens",
-        "HMI text list" => "Text lists",
-        _ => "HMI alarms",
-    };
-
-    // The file name (without extension) an item's files start with: its name, or for an HMI
-    // alarms item the fixed 'DiscreteAlarms'/'AnalogAlarms'/'AlarmClasses'.
-    private static string ItemStem(string kind, string name) =>
-        HmiAlarmKinds.Contains(kind) ? kind.Substring("HMI ".Length) : name;
-
-    // Root-relative, '/'-separated folder of an item: <device>/<section>/<group path>.
-    private static string ItemDir(string device, string kind, string groupPath)
-    {
-        var segments = new List<string> { Sanitize(device), SectionOf(kind) };
-        if (!string.IsNullOrEmpty(groupPath))
-            segments.AddRange(groupPath.Split('/').Select(Sanitize));
-        return string.Join("/", segments);
+        return (items, devices.Select(d => d.Name).ToList());
     }
 
     // Writes exported items to disk and records them in the manifest. A failed item keeps no file
@@ -1573,17 +940,6 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
         try { if (File.Exists(path)) File.Delete(path); } catch { /* best effort - a leftover file is reported by the next write_source_tree */ }
     }
 
-    private static string Label(string groupPath, string name) =>
-        string.IsNullOrEmpty(groupPath) ? name : $"{groupPath}/{name}";
-
-    // How an item appears in _export_summary.txt and tool results - the format ParseSourceTreeList reads back.
-    private static string Describe(string kind, string groupPath, string name) =>
-        HmiAlarmKinds.Contains(kind) ? kind : $"{kind} '{Label(groupPath, name)}'";
-
-    private static string Describe(SourceTreeItem item) => Describe(item.Kind, item.GroupPath, item.Name);
-
-    private static readonly string[] KindOrder = { "block", "tag table", "udt", "alarm text list", "HMI tag table", "HMI text list", "HMI screen template", "HMI pop-up screen", "HMI screen", "HMI DiscreteAlarms", "HMI AnalogAlarms", "HMI AlarmClasses" };
-
     // _export_summary.txt: every item in the tree, so it stays the full list for write_source_tree
     // after a read of only part of the project.
     private static string FormatSummary(string root, SourceTreeManifest manifest)
@@ -1597,11 +953,11 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
         foreach (var device in manifest.Items.GroupBy(i => i.Device, StringComparer.OrdinalIgnoreCase).OrderBy(g => g.Key, StringComparer.OrdinalIgnoreCase))
         {
             summary.AppendLine(device.All(i => i.Kind.StartsWith("HMI")) ? $"=== {device.Key} (HMI) ===" : $"=== {device.Key} ===");
-            foreach (var item in device.OrderBy(i => Array.IndexOf(KindOrder, i.Kind)).ThenBy(i => Label(i.GroupPath, i.Name), StringComparer.OrdinalIgnoreCase))
+            foreach (var item in device.OrderBy(i => SourceKinds.ListIndex(i.Kind)).ThenBy(i => Label(i.GroupPath, i.Name), StringComparer.OrdinalIgnoreCase))
             {
-                if (item.Ok) { summary.AppendLine($"  OK     {Describe(item)}"); continue; }
-                summary.AppendLine($"  FAILED {Describe(item)}: {item.Error}");
-                if (item.Stale) summary.AppendLine($"  STALE  {Describe(item)} - previous export left on disk with a '.stale' suffix, does not reflect current state");
+                if (item.Ok) { summary.AppendLine($"  OK     {Describe(item.Kind, item.GroupPath, item.Name)}"); continue; }
+                summary.AppendLine($"  FAILED {Describe(item.Kind, item.GroupPath, item.Name)}: {item.Error}");
+                if (item.Stale) summary.AppendLine($"  STALE  {Describe(item.Kind, item.GroupPath, item.Name)} - previous export left on disk with a '.stale' suffix, does not reflect current state");
             }
             summary.AppendLine();
         }
@@ -1618,18 +974,18 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
     {
         foreach (var raw in selection)
         {
-            var line = ListedItem.Match(raw.Trim());
+            var line = SourceKinds.ListedItem.Match(raw.Trim());
             if (line.Success && line.Groups["kind"].Value == kind
-                && (HmiAlarmKinds.Contains(kind) || string.Equals(line.Groups["label"].Value, Label(groupPath, name), StringComparison.OrdinalIgnoreCase)))
+                && (SourceKinds.IsFixed(kind) || string.Equals(line.Groups["label"].Value, Label(groupPath, name), StringComparison.OrdinalIgnoreCase)))
                 return true;
         }
 
-        if (HmiAlarmKinds.Contains(kind)) (groupPath, name) = ("HMI alarms", ItemStem(kind, name));
+        if (SourceKinds.IsFixed(kind)) (groupPath, name) = (SectionOf(kind), ItemStem(kind, name));
         var label = Label(groupPath, name);
         foreach (var raw in selection)
         {
             var entry = raw.Trim().Replace('\\', '/');
-            if (ListedItem.IsMatch(entry)) continue;
+            if (SourceKinds.ListedItem.IsMatch(entry)) continue;
             if (entry.EndsWith("/"))
             {
                 var group = entry.TrimEnd('/');
@@ -1642,19 +998,6 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
         }
         return false;
     }
-
-    private static readonly Regex ListedItem = new(@"^(?:(?<status>OK|FAILED|STALE)\s+)?(?:(?<kind>HMI (?:DiscreteAlarms|AnalogAlarms|AlarmClasses))\b|(?<kind>block|udt|tag table|alarm text list|HMI tag table|HMI screen template|HMI pop-up screen|HMI screen|HMI text list) '(?<label>[^']*)')", RegexOptions.Compiled);
-
-    private static string GroupDir(string plcDir, string sectionName, string groupPath)
-    {
-        var segments = new List<string> { plcDir, sectionName };
-        if (!string.IsNullOrEmpty(groupPath))
-            segments.AddRange(groupPath.Split('/').Select(Sanitize));
-        return Path.Combine(segments.ToArray());
-    }
-
-    private static string EnsureExtension(string fileName) =>
-        string.IsNullOrEmpty(Path.GetExtension(fileName)) ? fileName + ".txt" : fileName;
 
     // Renames leftover files from a previous successful export of this item to "<name>.stale" so
     // a failed re-export (e.g. the block went inconsistent) can't leave a same-named file on disk
@@ -1685,10 +1028,4 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
             File.Delete(file);
     }
 
-    private static string Sanitize(string name)
-    {
-        foreach (var c in Path.GetInvalidFileNameChars())
-            name = name.Replace(c, '_');
-        return name;
-    }
 }
