@@ -66,11 +66,11 @@ All MCP tools exposed by the server, grouped by area.
 
 | Tool | Purpose |
 |---|---|
-| `tia_connect` | Attach to the open TIA Portal instance (or open a project by `projectPath`), index PLC names — pass `processId` (from `list_tia_instances`) when more than one instance is running |
+| `tia_connect` | Attach to an open project or Multiuser local session, or open one by path (`.apXX` or `.alsXX`); pass `processId` (from `list_tia_instances`) when more than one instance is running |
 | `list_tia_instances` | List running TIA Portal instances (PID + window title) with no Openness prompt, to pick a `processId` for `tia_connect` |
 | `project_status` | Report unsaved-changes state, author, last-saved info |
-| `save_project` / `save_project_as` | Save in place, or save a copy to a new folder |
-| `close_project` | Close the connected project |
+| `save_project` / `save_project_as` | Save in place, or save a copy to a new folder; for Multiuser local sessions, save is local-only and Save As is unsupported |
+| `close_project` | Close the connected project; closing a Multiuser local session does not commit it to the server |
 | `list_project` | List PLC and HMI software with their blocks (language, consistency), UDTs, tag tables and empty groups — names only, fast; filter by text or software |
 
 ### PLC blocks
