@@ -495,7 +495,8 @@ An item that fails to export (e.g. an inconsistent block - GRAPH blocks must be 
     public Task<string> ReadSourceTree(
         [Description("Root directory of the source tree. Created if it doesn't exist; keep using the same one for the project.")] string targetDirectory,
         [Description("Optional: read only these items - 'Name', 'group/path/Name', 'group/path/' for everything below a group, or item lines as list_project shows them, optionally ending with the formats to read, e.g. \"tag table 'Tags' [csv, xml]\" (case-insensitive; for HMI alarms 'DiscreteAlarms', 'AnalogAlarms', 'AlarmClasses' or 'HMI alarms/'). Omit to read everything.")] string[]? items = null,
-        [Description("Optional: read only this PLC or HMI software name")] string? deviceName = null) => Safe(async () =>
+        [Description("Optional: read only this PLC or HMI software name")] string? deviceName = null,
+        [Description("Read into a tree that has an _export_summary.txt but no _manifest.json (read by an older version, or generated), making it a working copy of the connected project. Default false.")] bool adoptExisting = false) => Safe(async () =>
     {
         if (!_session.IsConnected) return "Not connected. Call tia_connect first.";
 
@@ -506,11 +507,11 @@ An item that fails to export (e.g. an inconsistent block - GRAPH blocks must be 
         // A tree without a manifest is written as-is by write_source_tree (e.g. one a generator
         // script writes). A manifest would turn it into a working copy, whose written items are read
         // back into it - replacing generated files with TIA Portal's rendering of them.
-        if (previous == null && File.Exists(Path.Combine(targetDirectory, "_export_summary.txt")))
+        if (previous == null && !adoptExisting && File.Exists(Path.Combine(targetDirectory, "_export_summary.txt")))
         {
             return $"'{targetDirectory}' holds a source tree without {SourceTreeManifest.FileName} - a generated tree, or one read by an older version. " +
                    "Reading into it would make it a working copy of the project, and write_source_tree would then read written items back into it, replacing its files with TIA Portal's rendering. " +
-                   "Read into another directory - or, for an old read tree, delete its _export_summary.txt first.";
+                   "Read into another directory - or, for a tree read by an older version, pass adoptExisting=true.";
         }
         if (partial && previous?.Project != null && previous.Project != _session.ProjectName)
         {
