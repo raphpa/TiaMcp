@@ -1331,10 +1331,9 @@ public sealed partial class TiaConnection : IDisposable
             {
                 foreach (var m in members)
                 {
-                    // Quote names that aren't plain identifiers (e.g. "M1-01"), as the object
-                    // model does.
+                    // Quoted like an SCL access path needs it (e.g. "M1-01", "Date").
                     var name = (string?)m.Attribute("Name") ?? "?";
-                    var path = prefix + (Regex.IsMatch(name, "^[A-Za-z_][A-Za-z0-9_]*$") ? name : $"\"{name}\"");
+                    var path = prefix + SclNames.Element(name);
                     lines.Add($"{path} : {(string?)m.Attribute("Datatype") ?? "?"}");
                     Walk(ChildMembers(m), path + ".");
                 }
@@ -1372,7 +1371,7 @@ public sealed partial class TiaConnection : IDisposable
             string dataType;
             try { dataType = member.GetAttribute("DataTypeName")?.ToString() ?? "?"; }
             catch { dataType = "?"; }
-            sb.AppendLine($"{member.Name} : {dataType}");
+            sb.AppendLine($"{SclNames.Element(member.Name)} : {dataType}");
         }
         return sb.ToString();
     }
