@@ -216,13 +216,24 @@ public sealed partial class TiaConnection : IDisposable
         }
     }
 
+    private static string? GetLocalSessionPath(FileInfo? projectPath)
+    {
+        // <session>\\<session>.alsXX; Project.Path is <session>\\LS\\<project>.amcXX.
+        var sessionDirectory = projectPath?.Directory?.Parent;
+        if (projectPath == null || sessionDirectory == null ||
+            !Regex.IsMatch(projectPath.Extension, @"^\.amc\d+$", RegexOptions.IgnoreCase))
+        {
+            return null;
+        }
+
+        var sessionPath = Path.Combine(sessionDirectory.FullName,
+            sessionDirectory.Name + ".als" + projectPath.Extension.Substring(4));
+        return File.Exists(sessionPath) ? sessionPath : null;
+    }
+
     private static bool IsSameLocalSessionPath(LocalSession session, FileInfo sessionFile)
     {
-        // The .alsXX file shares its root directory/name; Project.Path points inside its LS folder.
-        var sessionDirectory = session.Project.Path?.Directory?.Parent;
-        return sessionDirectory != null &&
-            string.Equals(sessionDirectory.FullName, sessionFile.DirectoryName, StringComparison.OrdinalIgnoreCase) &&
-            string.Equals(sessionDirectory.Name, Path.GetFileNameWithoutExtension(sessionFile.Name), StringComparison.OrdinalIgnoreCase);
+        return string.Equals(GetLocalSessionPath(session.Project.Path), sessionFile.FullName, StringComparison.OrdinalIgnoreCase);
     }
 
     private ConnectResult FinalizeConnect(TiaPortal portal, ProjectBase project, LocalSession? localSession = null)
@@ -238,7 +249,10 @@ public sealed partial class TiaConnection : IDisposable
             CollectSoftware(device.DeviceItems);
         }
 
-        return new ConnectResult(true, project.Name, project.Path?.FullName, null);
+        var projectPath = localSession == null
+            ? project.Path?.FullName
+            : GetLocalSessionPath(project.Path) ?? project.Path?.FullName;
+        return new ConnectResult(true, project.Name, projectPath, null);
     }
 
     public ConnectResult SaveProjectAs(string targetDirectory)
