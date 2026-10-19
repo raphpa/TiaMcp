@@ -263,9 +263,13 @@ public sealed partial class TiaConnection : IDisposable
         {
             return new ConnectResult(false, null, null, "Save As is not supported for a Multiuser local session.");
         }
+        if (!(_project is Project project))
+        {
+            return new ConnectResult(false, null, null, "Save As is not supported for this project type.");
+        }
         try
         {
-            ((Project)_project!).SaveAs(new DirectoryInfo(targetDirectory));
+            project.SaveAs(new DirectoryInfo(targetDirectory));
             return new ConnectResult(true, _project.Name, _project.Path?.FullName, null);
         }
         catch (Exception ex)
@@ -280,7 +284,8 @@ public sealed partial class TiaConnection : IDisposable
         try
         {
             if (_localSession != null) _localSession.Save();
-            else ((Project)_project!).Save();
+            else if (_project is Project project) project.Save();
+            else return new SimpleResult(false, "Save is not supported for this project type.");
             return new SimpleResult(true, null);
         }
         catch (Exception ex)
@@ -295,7 +300,8 @@ public sealed partial class TiaConnection : IDisposable
         try
         {
             if (_localSession != null) _localSession.Close();
-            else ((Project)_project!).Close();
+            else if (_project is Project project) project.Close();
+            else return new SimpleResult(false, "Close is not supported for this project type.");
             _tiaPortal?.Dispose();
             _tiaPortal = null;
             _project = null;
