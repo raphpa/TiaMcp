@@ -52,13 +52,18 @@ public sealed class TiaSession
 
     public async Task<SimpleResult> CloseProjectAsync()
     {
-        var result = await _sta.InvokeAsync(() => _connection.CloseProject());
-        if (result.Success)
+        try
         {
-            ProjectName = null;
-            ProjectPath = null;
+            return await _sta.InvokeAsync(() => _connection.CloseProject());
         }
-        return result;
+        finally
+        {
+            if (!_connection.IsConnected)
+            {
+                ProjectName = null;
+                ProjectPath = null;
+            }
+        }
     }
 
     public Task<ProjectStatus> GetProjectStatusAsync()

@@ -20,6 +20,7 @@ using Siemens.Engineering.HmiUnified;
 using Siemens.Engineering.HmiUnified.HmiTags;
 using Siemens.Engineering.HmiUnified.HmiAlarm;
 using Siemens.Engineering.HmiUnified.HmiAlarm.HmiAlarmCommon;
+using Siemens.Engineering.Multiuser;
 
 namespace TiaMcp.Openness;
 
@@ -31,7 +32,8 @@ namespace TiaMcp.Openness;
 public sealed partial class TiaConnection : IDisposable
 {
     private TiaPortal? _tiaPortal;
-    private Project? _project;
+    private ProjectBase? _project;
+    private LocalSession? _localSession;
     private readonly Dictionary<string, PlcSoftware> _softwareByName = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, HmiSoftware> _hmiSoftwareByName = new(StringComparer.OrdinalIgnoreCase);
 
@@ -118,14 +120,43 @@ public sealed partial class TiaConnection : IDisposable
             return new ConnectResult(false, null, null, $"Could not attach to TIA Portal process {processId}: {ex.Message}");
         }
 
-        Project? existing;
+        ProjectBase? existing;
+        LocalSession? existingSession = null;
         try
         {
-            existing = portal.Projects.FirstOrDefault();
+            var openProjects = portal.Projects;
+            existing = openProjects.Count == 0 ? null : openProjects[0];
+            if (existing == null)
+            {
+                var openSessionCount = 0;
+                LocalSessionComposition? openSessions = null;
+                try
+                {
+                    openSessions = portal.LocalSessions;
+                    openSessionCount = openSessions.Count;
+                }
+                catch
+                {
+                    // A TIA install may not expose Multiuser sessions; preserve the plain-project path.
+                }
+                if (openSessionCount > 1)
+                {
+                    portal.Dispose();
+                    return new ConnectResult(false, null, null,
+                        $"TIA Portal process {processId} has {openSessionCount} Multiuser local sessions open; refusing to guess which one to use.");
+                }
+                if (openSessionCount == 1)
+                {
+                    existingSession = openSessions![0];
+                    existing = existingSession.Project;
+                }
+            }
         }
-        catch
+        catch (Exception ex)
         {
-            existing = null;
+            portal.Dispose();
+            return new ConnectResult(false, null, null,
+                $"Attached to TIA Portal process {processId}, but could not inspect its open projects: {ex.GetType().Name}: {ex.Message}");
         }
 
         if (string.IsNullOrWhiteSpace(projectPath))
@@ -135,7 +166,7 @@ public sealed partial class TiaConnection : IDisposable
                 portal.Dispose();
                 return new ConnectResult(false, null, null, $"Attached to TIA Portal process {processId}, but no project is open in it. Pass projectPath to open one by path.");
             }
-            return FinalizeConnect(portal, existing);
+            return FinalizeConnect(portal, existing, existingSession);
         }
 
         var fileInfo = new FileInfo(projectPath);
@@ -145,9 +176,19 @@ public sealed partial class TiaConnection : IDisposable
             return new ConnectResult(false, null, null, $"Project file not found: {projectPath}");
         }
 
-        if (existing?.Path != null && string.Equals(existing.Path.FullName, fileInfo.FullName, StringComparison.OrdinalIgnoreCase))
+        var isLocalSessionFile = Regex.IsMatch(fileInfo.Extension, @"^\.als\d+$", RegexOptions.IgnoreCase);
+        var sameOpenProject = existing?.Path != null &&
+            string.Equals(existing.Path.FullName, fileInfo.FullName, StringComparison.OrdinalIgnoreCase);
+        var sameOpenLocalSession = existingSession != null &&
+            isLocalSessionFile &&
+            IsSameLocalSessionPath(existingSession, fileInfo);
+        if (sameOpenProject)
         {
-            return FinalizeConnect(portal, existing);
+            return FinalizeConnect(portal, existing!, existingSession);
+        }
+        if (sameOpenLocalSession)
+        {
+            return FinalizeConnect(portal, existing!, existingSession, fileInfo.FullName);
         }
 
         if (existing != null)
@@ -159,6 +200,12 @@ public sealed partial class TiaConnection : IDisposable
 
         try
         {
+            if (isLocalSessionFile)
+            {
+                var session = portal.LocalSessions.Open(fileInfo);
+                return FinalizeConnect(portal, session.Project, session, fileInfo.FullName);
+            }
+
             var opened = portal.Projects.Open(fileInfo);
             return FinalizeConnect(portal, opened);
         }
@@ -169,10 +216,31 @@ public sealed partial class TiaConnection : IDisposable
         }
     }
 
-    private ConnectResult FinalizeConnect(TiaPortal portal, Project project)
+    private static string? GetLocalSessionPath(FileInfo? projectPath)
+    {
+        // <session>\\<session>.alsXX; Project.Path is <session>\\LS\\<project>.amcXX.
+        var sessionDirectory = projectPath?.Directory?.Parent;
+        if (projectPath == null || sessionDirectory == null ||
+            !Regex.IsMatch(projectPath.Extension, @"^\.amc\d+$", RegexOptions.IgnoreCase))
+        {
+            return null;
+        }
+
+        var sessionPath = Path.Combine(sessionDirectory.FullName,
+            sessionDirectory.Name + ".als" + projectPath.Extension.Substring(4));
+        return File.Exists(sessionPath) ? sessionPath : null;
+    }
+
+    private static bool IsSameLocalSessionPath(LocalSession session, FileInfo sessionFile)
+    {
+        return string.Equals(GetLocalSessionPath(session.Project.Path), sessionFile.FullName, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private ConnectResult FinalizeConnect(TiaPortal portal, ProjectBase project, LocalSession? localSession = null, string? localSessionPath = null)
     {
         _tiaPortal = portal;
         _project = project;
+        _localSession = localSession;
         _softwareByName.Clear();
         _hmiSoftwareByName.Clear();
         _hmiTargetByName.Clear();
@@ -181,15 +249,26 @@ public sealed partial class TiaConnection : IDisposable
             CollectSoftware(device.DeviceItems);
         }
 
-        return new ConnectResult(true, project.Name, project.Path?.FullName, null);
+        var projectPath = localSession == null
+            ? project.Path?.FullName
+            : localSessionPath ?? GetLocalSessionPath(project.Path);
+        return new ConnectResult(true, project.Name, projectPath, null);
     }
 
     public ConnectResult SaveProjectAs(string targetDirectory)
     {
         EnsureConnected();
+        if (_localSession != null)
+        {
+            return new ConnectResult(false, null, null, "Save As is not supported for a Multiuser local session.");
+        }
+        if (!(_project is Project project))
+        {
+            return new ConnectResult(false, null, null, "Save As is not supported for this project type.");
+        }
         try
         {
-            _project!.SaveAs(new DirectoryInfo(targetDirectory));
+            project.SaveAs(new DirectoryInfo(targetDirectory));
             return new ConnectResult(true, _project.Name, _project.Path?.FullName, null);
         }
         catch (Exception ex)
@@ -203,7 +282,9 @@ public sealed partial class TiaConnection : IDisposable
         EnsureConnected();
         try
         {
-            _project!.Save();
+            if (_localSession != null) _localSession.Save();
+            else if (_project is Project project) project.Save();
+            else return new SimpleResult(false, "Save is not supported for this project type.");
             return new SimpleResult(true, null);
         }
         catch (Exception ex)
@@ -217,11 +298,24 @@ public sealed partial class TiaConnection : IDisposable
         EnsureConnected();
         try
         {
-            _project!.Close();
+            if (_localSession != null) _localSession.Close();
+            else if (_project is Project project) project.Close();
+            else return new SimpleResult(false, "Close is not supported for this project type.");
+            var portal = _tiaPortal;
+            _tiaPortal = null;
             _project = null;
+            _localSession = null;
             _softwareByName.Clear();
             _hmiSoftwareByName.Clear();
             _hmiTargetByName.Clear();
+            try
+            {
+                portal?.Dispose();
+            }
+            catch (Exception ex)
+            {
+                return new SimpleResult(false, $"Project closed, but disposing the TIA Portal attachment failed: {ex.Message}");
+            }
             return new SimpleResult(true, null);
         }
         catch (Exception ex)
