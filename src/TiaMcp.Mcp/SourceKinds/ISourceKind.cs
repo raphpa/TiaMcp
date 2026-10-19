@@ -25,31 +25,41 @@ internal interface ISourceKind
     // file's name without extension. The item's own name is then empty. Null for other kinds.
     string? FixedName { get; }
 
-    // Writable file extensions, best first: a file with one of them that no read put in the
-    // section is a new item.
-    IReadOnlyList<string> Extensions { get; }
+    // Whether an XML export needs the item consistent (compiled), as for blocks and UDTs: an
+    // import leaves it inconsistent, so write_source_tree compiles the software before reading
+    // such an item back as XML.
+    bool XmlNeedsCompile { get; }
+
+    // Every SourceFormat an item of this kind can be in, its own formats first and "xml" (the raw
+    // export) last where Openness has one. A file in the section with one of their extensions that
+    // no read put there is a new item.
+    IReadOnlyList<string> Formats { get; }
 
     // For list_project: the items (and e.g. empty groups) of one device, names only.
     Task<IReadOnlyList<ListedEntry>> List(TiaSession session, string device);
 
-    // Exports the items include (group path, name) selects into items - a failure per item, not as a whole.
-    Task Export(TiaSession session, string device, Func<string, string, bool> include, List<ExportedItem> items);
+    // Exports the items formats (group path, name) selects into items, in the formats it returns:
+    // null skips the item, an empty list means its own format. A failure is per item, not as a whole.
+    Task Export(TiaSession session, string device, Func<string, string, IReadOnlyCollection<string>?> formats, List<ExportedItem> items);
 
-    // Writes the given items of one device from their files; see write_source_tree.
+    // Writes the given items of one device from their files, each from its ImportListItem.Format;
+    // see write_source_tree.
     Task<WriteLog> Write(WriteContext context, IReadOnlyList<ImportListItem> items);
 }
 
-// One line of list_project. A group line (isItem false) is listed but not counted as an item;
-// an inconsistent item (e.g. a block that needs a compile) is counted separately too.
+// One line of list_project, with the item's formats (none for a group line). A group line
+// (isItem false) is listed but not counted as an item; an inconsistent item (e.g. a block that
+// needs a compile) is counted separately too.
 internal sealed class ListedEntry
 {
-    public ListedEntry(string groupPath, string name, string text, bool isItem = true, bool inconsistent = false)
+    public ListedEntry(string groupPath, string name, string text, IReadOnlyList<string> formats, bool isItem = true, bool inconsistent = false)
     {
-        GroupPath = groupPath; Name = name; Text = text; IsItem = isItem; Inconsistent = inconsistent;
+        GroupPath = groupPath; Name = name; Text = text; Formats = formats; IsItem = isItem; Inconsistent = inconsistent;
     }
     public string GroupPath { get; }
     public string Name { get; }
     public string Text { get; }
+    public IReadOnlyList<string> Formats { get; }
     public bool IsItem { get; }
     public bool Inconsistent { get; }
 }

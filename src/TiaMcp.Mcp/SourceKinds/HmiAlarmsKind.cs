@@ -24,14 +24,15 @@ internal sealed class HmiAlarmsKind : ISourceKind
     public string Section => "HMI alarms";
     public DeviceFamily Family => DeviceFamily.HmiUnified;
     public string? FixedName { get; }
-    public IReadOnlyList<string> Extensions { get; } = new[] { ".csv" };
+    public bool XmlNeedsCompile => false;
+    public IReadOnlyList<string> Formats { get; } = new[] { SourceFormat.Csv };
 
     public Task<IReadOnlyList<ListedEntry>> List(TiaSession session, string hmi) =>
-        Task.FromResult<IReadOnlyList<ListedEntry>>(new[] { new ListedEntry(Section, FixedName!, Name) });
+        Task.FromResult<IReadOnlyList<ListedEntry>>(new[] { new ListedEntry(Section, FixedName!, Name, Formats) });
 
-    public async Task Export(TiaSession session, string hmi, Func<string, string, bool> include, List<ExportedItem> items)
+    public async Task Export(TiaSession session, string hmi, Func<string, string, IReadOnlyCollection<string>?> formats, List<ExportedItem> items)
     {
-        if (!include("", "")) return;
+        if (formats("", "") == null) return;
         try
         {
             var csv = _alarmType == null

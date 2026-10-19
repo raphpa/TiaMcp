@@ -22,6 +22,9 @@ internal sealed class ImportListItem
     public string ItemName { get; }
     public bool Ok { get; }
 
+    // The SourceFormat to write the item from, decided by write_source_tree from its files.
+    public string? Format { get; set; }
+
     public bool Is(string device, string kind, string name) =>
         string.Equals(DeviceName, device, StringComparison.OrdinalIgnoreCase)
         && Kind == kind
@@ -33,9 +36,12 @@ internal sealed class ImportListItem
 // file (the HMI alarm files) has no name.
 internal sealed class ExportedItem
 {
-    public ExportedItem(string device, string kind, string groupPath, string name, List<(string Path, string Content, bool Bom)> files, string? error)
+    // formats: the formats the item can be read in, friendly format first; by default the
+    // formats of its files.
+    public ExportedItem(string device, string kind, string groupPath, string name, List<(string Path, string Content, bool Bom)> files, string? error, IReadOnlyList<string>? formats = null)
     {
         Device = device; Kind = kind; GroupPath = groupPath; Name = name; Files = files; Error = error;
+        Formats = formats ?? files.Select(f => SourceTreeManifest.FormatOf(f.Path)).Distinct().ToList();
     }
     public string Device { get; }
     public string Kind { get; }
@@ -43,18 +49,22 @@ internal sealed class ExportedItem
     public string Name { get; }
     public List<(string Path, string Content, bool Bom)> Files { get; }
     public string? Error { get; }
+    public IReadOnlyList<string> Formats { get; }
     public bool Ok => Error == null;
 
-    // Blocks and UDTs: the documents TIA Portal exports (.s7dcl/.s7res, .graph.il, .awl, companions).
-    public static ExportedItem FromDocuments(string device, string kind, string groupPath, string name, ExportResult result)
+    // The documents a read returns, one or more per format (.s7dcl/.s7res, .graph.il, .awl, .csv,
+    // .xml, companions); formats as in the constructor.
+    public static ExportedItem FromDocuments(string device, string kind, string groupPath, string name, ExportResult result, IReadOnlyList<string>? formats = null)
     {
         var dir = SourceTree.ItemDir(device, kind, groupPath);
-        var files = result.Documents.Select(d => ($"{dir}/{SourceTree.Sanitize(SourceTree.EnsureExtension(d.FileName))}", d.Content, false)).ToList();
-        return new ExportedItem(device, kind, groupPath, name, files, result.Success ? null : result.Error ?? "export failed");
+        var files = result.Documents.Select(d => ($"{dir}/{SourceTree.Sanitize(SourceTree.EnsureExtension(d.FileName))}", d.Content, IsCsv(d.FileName))).ToList();
+        return new ExportedItem(device, kind, groupPath, name, files, result.Success ? null : result.Error ?? "export failed", formats);
     }
 
     // CSV gets a UTF-8 BOM so Excel auto-detects the encoding and opening the file directly
     // (double-click) renders non-ASCII comment/tag text correctly instead of mangling it.
+    private static bool IsCsv(string fileName) => fileName.EndsWith(SourceFormat.Extension(SourceFormat.Csv), StringComparison.OrdinalIgnoreCase);
+
     public static ExportedItem FromCsv(string device, string kind, string groupPath, string name, string? csv, string? error)
     {
         var files = csv == null

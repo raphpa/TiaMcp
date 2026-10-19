@@ -72,6 +72,37 @@ internal static class SourceTree
         }
     }
 
+    // Marks a report line of an item written from its raw XML.
+    public static string FromXml(ImportListItem item) => item.Format == SourceFormat.Xml ? " (from XML)" : "";
+
+    // The item's '<name>.xml', or null after logging that it's missing.
+    public static string? ReadXml(WriteContext context, ISourceKind kind, ImportListItem item, WriteLog log)
+    {
+        var file = Path.Combine(GroupDir(context.DeviceDir, kind.Section, item.GroupPath), Sanitize(item.ItemName) + SourceFormat.Extension(SourceFormat.Xml));
+        if (File.Exists(file)) return File.ReadAllText(file);
+        log.Failed.Add($"{Describe(kind.Name, item.GroupPath, item.ItemName)}: no .xml file found at {file}");
+        return null;
+    }
+
+    // Writes one item from its raw XML right away (kinds without dependency layers): replaces it
+    // when it exists, creates it (and its group) when it doesn't.
+    public static async Task WriteXml(WriteContext context, ISourceKind kind, ImportListItem item, WriteLog log, bool exists, ISet<string> ensuredGroups,
+        Func<string, string, Task> createGroup, Func<string, Task<ImportResult>> import)
+    {
+        var label = Describe(kind.Name, item.GroupPath, item.ItemName) + FromXml(item);
+        var xml = ReadXml(context, kind, item, log);
+        if (xml == null) return;
+        if (exists && !context.OverwriteExisting) { log.Skipped.Add($"{label} - already exists, overwriteExisting=false"); return; }
+        if (!exists && !context.CreateMissing) { log.Skipped.Add($"{label} - does not exist, createMissing=false"); return; }
+        if (context.DryRun) { (exists ? log.Updated : log.Created).Add($"{label} (dry run)"); return; }
+
+        if (!exists) await EnsureGroupPath(item.GroupPath, createGroup, ensuredGroups);
+        var result = await import(xml);
+        if (!result.Success) { log.Failed.Add($"{label}: {string.Join(" | ", result.Messages)}"); return; }
+        (exists ? log.Updated : log.Created).Add(label);
+        context.Written.Add(item);
+    }
+
     public static string DeletedTags(WriteTagsResult result)
     {
         var deleted = result.Messages.Where(m => m.StartsWith("Deleted '")).Select(m => m.Substring("Deleted ".Length).TrimEnd('.')).ToList();

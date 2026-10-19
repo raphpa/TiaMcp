@@ -3,31 +3,33 @@ using static TiaMcp.Mcp.SourceTree;
 
 namespace TiaMcp.Mcp;
 
-// PLC tag tables: one CSV per table (see TagTableCsv), in groups.
+// PLC tag tables, in groups: one CSV per table (see TagTableCsv), or the raw XML export.
 internal sealed class PlcTagTableKind : ISourceKind
 {
     public string Name => "tag table";
     public string Section => "PLC tags";
     public DeviceFamily Family => DeviceFamily.Plc;
     public string? FixedName => null;
-    public IReadOnlyList<string> Extensions { get; } = new[] { ".csv" };
+    public bool XmlNeedsCompile => false;
+    public IReadOnlyList<string> Formats { get; } = new[] { SourceFormat.Csv, SourceFormat.Xml };
 
     public async Task<IReadOnlyList<ListedEntry>> List(TiaSession session, string plc)
     {
         var tables = await session.ListTagTablesAsync(plc);
-        var entries = tables.Select(t => new ListedEntry(t.GroupPath, t.Name, Describe(Name, t.GroupPath, t.Name))).ToList();
+        var entries = tables.Select(t => new ListedEntry(t.GroupPath, t.Name, Describe(Name, t.GroupPath, t.Name), Formats)).ToList();
         entries.AddRange(EmptyGroups(tables.Select(t => t.GroupPath), await session.ListTagTableGroupsAsync(plc))
-            .Select(g => new ListedEntry(g, "", $"tag table group '{g}' (empty)", isItem: false)));
+            .Select(g => new ListedEntry(g, "", $"tag table group '{g}' (empty)", Array.Empty<string>(), isItem: false)));
         return entries;
     }
 
-    public async Task Export(TiaSession session, string plc, Func<string, string, bool> include, List<ExportedItem> items)
+    public async Task Export(TiaSession session, string plc, Func<string, string, IReadOnlyCollection<string>?> formats, List<ExportedItem> items)
     {
-        foreach (var (t, result) in await session.ReadAllTagTablesAsync(plc, include))
-            items.Add(ExportedItem.FromCsv(plc, Name, t.GroupPath, t.Name, result.Success ? TagTableCsv.Format(result.Tags) : null, result.Error));
+        foreach (var (t, result) in await session.ReadAllTagTablesAsync(plc, formats))
+            items.Add(ExportedItem.FromDocuments(plc, Name, t.GroupPath, t.Name, result, Formats));
     }
 
-    // In a working copy, tags of an existing table that its CSV no longer has are deleted.
+    // From the CSV, rows update or add tags, and in a working copy tags of an existing table that
+    // its CSV no longer has are deleted. From the XML, the whole table is replaced.
     public async Task<WriteLog> Write(WriteContext context, IReadOnlyList<ImportListItem> items)
     {
         var log = new WriteLog();
@@ -39,6 +41,15 @@ internal sealed class PlcTagTableKind : ISourceKind
         foreach (var item in items)
         {
             var label = Describe(Name, item.GroupPath, item.ItemName);
+            if (item.Format == SourceFormat.Xml)
+            {
+                var (groupPath, tableName) = (item.GroupPath, item.ItemName);
+                await WriteXml(context, this, item, log, existingTables.Contains(item.ItemName), ensuredGroups,
+                    (parent, segment) => session.CreateTagTableGroupAsync(plc, parent, segment),
+                    xml => session.ImportTagTableXmlAsync(plc, groupPath, tableName, xml));
+                continue;
+            }
+
             var file = Path.Combine(GroupDir(context.DeviceDir, Section, item.GroupPath), Sanitize(item.ItemName) + ".csv");
             if (!File.Exists(file)) { log.Failed.Add($"{label}: no .csv file found at {file}"); continue; }
 

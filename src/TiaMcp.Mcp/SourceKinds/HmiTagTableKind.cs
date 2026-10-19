@@ -11,20 +11,21 @@ internal sealed class HmiTagTableKind : ISourceKind
     public string Section => "HMI tags";
     public DeviceFamily Family => DeviceFamily.HmiUnified;
     public string? FixedName => null;
-    public IReadOnlyList<string> Extensions { get; } = new[] { ".csv" };
+    public bool XmlNeedsCompile => false;
+    public IReadOnlyList<string> Formats { get; } = new[] { SourceFormat.Csv };
 
     public async Task<IReadOnlyList<ListedEntry>> List(TiaSession session, string hmi)
     {
         var tables = await session.ListHmiTagTablesAsync(hmi);
-        var entries = tables.Select(t => new ListedEntry(t.GroupPath, t.Name, Describe(Name, t.GroupPath, t.Name))).ToList();
+        var entries = tables.Select(t => new ListedEntry(t.GroupPath, t.Name, Describe(Name, t.GroupPath, t.Name), Formats)).ToList();
         entries.AddRange(EmptyGroups(tables.Select(t => t.GroupPath), await session.ListHmiTagTableGroupsAsync(hmi))
-            .Select(g => new ListedEntry(g, "", $"HMI tag table group '{g}' (empty)", isItem: false)));
+            .Select(g => new ListedEntry(g, "", $"HMI tag table group '{g}' (empty)", Array.Empty<string>(), isItem: false)));
         return entries;
     }
 
-    public async Task Export(TiaSession session, string hmi, Func<string, string, bool> include, List<ExportedItem> items)
+    public async Task Export(TiaSession session, string hmi, Func<string, string, IReadOnlyCollection<string>?> formats, List<ExportedItem> items)
     {
-        foreach (var table in (await session.ListHmiTagTablesAsync(hmi)).Where(t => include(t.GroupPath, t.Name)))
+        foreach (var table in (await session.ListHmiTagTablesAsync(hmi)).Where(t => formats(t.GroupPath, t.Name) != null))
         {
             try
             {

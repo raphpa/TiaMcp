@@ -4,24 +4,35 @@ using static TiaMcp.Mcp.SourceTree;
 namespace TiaMcp.Mcp;
 
 // Program blocks, in groups: TIA Portal's own document format (.s7dcl/.s7res), a GRAPH block as
-// '.graph.il', a whole-block STL block as '.awl'; see read_source_tree for the read-only companions.
+// '.graph.il', a whole-block STL block as '.awl' (see read_source_tree for the read-only
+// companions) - or any block as the raw XML export.
 internal sealed class BlockKind : ISourceKind
 {
     public string Name => "block";
     public string Section => "Program blocks";
     public DeviceFamily Family => DeviceFamily.Plc;
     public string? FixedName => null;
-    public IReadOnlyList<string> Extensions { get; } = new[] { ".s7dcl", ".graph.il", ".awl" };
+    public bool XmlNeedsCompile => true;
+    public IReadOnlyList<string> Formats { get; } = new[] { SourceFormat.S7dcl, SourceFormat.GraphIL, SourceFormat.Awl, SourceFormat.Xml };
+
+    // A block's own format follows from its language (see TiaConnection.ReadBlock); every block
+    // also has the raw XML.
+    private static IReadOnlyList<string> FormatsOf(string language) => language switch
+    {
+        "GRAPH" => new[] { SourceFormat.GraphIL, SourceFormat.Xml },
+        "STL" => new[] { SourceFormat.Awl, SourceFormat.Xml },
+        _ => new[] { SourceFormat.S7dcl, SourceFormat.Xml },
+    };
 
     public async Task<IReadOnlyList<ListedEntry>> List(TiaSession session, string plc) =>
         (await session.ListBlocksAsync(plc))
-            .Select(b => new ListedEntry(b.GroupPath, b.Name, $"{Describe(Name, b.GroupPath, b.Name)} [{b.Language}]{(b.Consistent ? "" : " INCONSISTENT")}", inconsistent: !b.Consistent))
+            .Select(b => new ListedEntry(b.GroupPath, b.Name, $"{Describe(Name, b.GroupPath, b.Name)} [{b.Language}]{(b.Consistent ? "" : " INCONSISTENT")}", FormatsOf(b.Language), inconsistent: !b.Consistent))
             .ToList();
 
-    public async Task Export(TiaSession session, string plc, Func<string, string, bool> include, List<ExportedItem> items)
+    public async Task Export(TiaSession session, string plc, Func<string, string, IReadOnlyCollection<string>?> formats, List<ExportedItem> items)
     {
-        foreach (var (b, result) in await session.ReadAllBlocksAsync(plc, include))
-            items.Add(ExportedItem.FromDocuments(plc, Name, b.GroupPath, b.Name, result));
+        foreach (var (b, result) in await session.ReadAllBlocksAsync(plc, formats))
+            items.Add(ExportedItem.FromDocuments(plc, Name, b.GroupPath, b.Name, result, FormatsOf(b.Language)));
     }
 
     // Global DBs and called FBs before their callers and instance DBs - see DependencyWrites.
@@ -39,6 +50,24 @@ internal sealed class BlockKind : ISourceKind
         foreach (var item in items)
         {
             var label = Describe(Name, item.GroupPath, item.ItemName);
+            if (item.Format == SourceFormat.Xml)
+            {
+                // Any block, including GRAPH and blocks with embedded STL networks: the import
+                // replaces or creates it as a whole.
+                var xml = ReadXml(context, this, item, log);
+                if (xml == null) continue;
+                var exists = existingBlocks.Contains(item.ItemName);
+                if (exists && !context.OverwriteExisting) { log.Skipped.Add($"{label} - already exists, overwriteExisting=false"); continue; }
+                if (!exists && !context.CreateMissing) { log.Skipped.Add($"{label} - does not exist, createMissing=false"); continue; }
+                if (context.DryRun) { (exists ? log.Updated : log.Created).Add($"{label}{FromXml(item)} (dry run)"); continue; }
+
+                if (!exists) await EnsureGroupPath(item.GroupPath, (parent, segment) => session.CreateBlockGroupAsync(plc, parent, segment), ensuredGroups);
+                var (xmlGroup, xmlName) = (item.GroupPath, item.ItemName);
+                writes.Add(new PendingWrite(item, label + FromXml(item), new List<BlockDocument> { new(xmlName + SourceFormat.Extension(SourceFormat.Xml), xml) }, !exists,
+                    () => session.ImportBlockXmlAsync(plc, xmlGroup, xmlName, xml)));
+                continue;
+            }
+
             var (docs, error) = ReadDocuments(GroupDir(context.DeviceDir, Section, item.GroupPath), item.ItemName);
             if (docs == null)
             {

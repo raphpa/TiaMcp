@@ -81,19 +81,34 @@ public sealed class TiaSession
         return _sta.InvokeAsync(() => _connection.ListBlocks(plcName));
     }
 
-    public Task<IReadOnlyList<(BlockSummary Block, ExportResult Result)>> ReadAllBlocksAsync(string plcName, Func<string, string, bool>? include = null)
+    public Task<IReadOnlyList<(BlockSummary Block, ExportResult Result)>> ReadAllBlocksAsync(string plcName, Func<string, string, IReadOnlyCollection<string>?>? formats = null)
     {
-        return _sta.InvokeAsync(() => _connection.ReadAllBlocks(plcName, include));
+        return _sta.InvokeAsync(() => _connection.ReadAllBlocks(plcName, formats));
     }
 
-    public Task<IReadOnlyList<(TypeSummary Type, ExportResult Result)>> ReadAllUdtsAsync(string plcName, Func<string, string, bool>? include = null)
+    public Task<IReadOnlyList<(TypeSummary Type, ExportResult Result)>> ReadAllUdtsAsync(string plcName, Func<string, string, IReadOnlyCollection<string>?>? formats = null)
     {
-        return _sta.InvokeAsync(() => _connection.ReadAllUdts(plcName, include));
+        return _sta.InvokeAsync(() => _connection.ReadAllUdts(plcName, formats));
     }
 
-    public Task<IReadOnlyList<(TagTableSummary Table, TagTableResult Result)>> ReadAllTagTablesAsync(string plcName, Func<string, string, bool>? include = null)
+    public Task<IReadOnlyList<(TagTableSummary Table, ExportResult Result)>> ReadAllTagTablesAsync(string plcName, Func<string, string, IReadOnlyCollection<string>?>? formats = null)
     {
-        return _sta.InvokeAsync(() => _connection.ReadAllTagTables(plcName, include));
+        return _sta.InvokeAsync(() => _connection.ReadAllTagTables(plcName, formats));
+    }
+
+    public Task<ImportResult> ImportBlockXmlAsync(string plcName, string groupPath, string blockName, string xml)
+    {
+        return _sta.InvokeAsync(() => _connection.ImportBlockXml(plcName, groupPath, blockName, xml));
+    }
+
+    public Task<ImportResult> ImportUdtXmlAsync(string plcName, string groupPath, string typeName, string xml)
+    {
+        return _sta.InvokeAsync(() => _connection.ImportUdtXml(plcName, groupPath, typeName, xml));
+    }
+
+    public Task<ImportResult> ImportTagTableXmlAsync(string plcName, string groupPath, string tableName, string xml)
+    {
+        return _sta.InvokeAsync(() => _connection.ImportTagTableXml(plcName, groupPath, tableName, xml));
     }
 
     public Task<IReadOnlyList<TypeSummary>> ListPlcTypesAsync(string plcName)

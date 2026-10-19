@@ -11,14 +11,15 @@ internal sealed class PlcAlarmTextListKind : ISourceKind
     public string Section => "PLC alarm text lists";
     public DeviceFamily Family => DeviceFamily.Plc;
     public string? FixedName => null;
-    public IReadOnlyList<string> Extensions { get; } = new[] { ".csv" };
+    public bool XmlNeedsCompile => false;
+    public IReadOnlyList<string> Formats { get; } = new[] { SourceFormat.Csv };
 
     public async Task<IReadOnlyList<ListedEntry>> List(TiaSession session, string plc) =>
-        (await session.ListPlcAlarmTextListNamesAsync(plc)).Select(n => new ListedEntry("", n, Describe(Name, "", n))).ToList();
+        (await session.ListPlcAlarmTextListNamesAsync(plc)).Select(n => new ListedEntry("", n, Describe(Name, "", n), Formats)).ToList();
 
-    public async Task Export(TiaSession session, string plc, Func<string, string, bool> include, List<ExportedItem> items)
+    public async Task Export(TiaSession session, string plc, Func<string, string, IReadOnlyCollection<string>?> formats, List<ExportedItem> items)
     {
-        var names = (await session.ListPlcAlarmTextListNamesAsync(plc)).Where(n => include("", n)).ToList();
+        var names = (await session.ListPlcAlarmTextListNamesAsync(plc)).Where(n => formats("", n) != null).ToList();
         if (names.Count == 0) return;
         var read = await session.ReadPlcAlarmTextListsAsync(plc);
         foreach (var name in names)

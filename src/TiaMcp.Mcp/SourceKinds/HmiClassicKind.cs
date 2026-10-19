@@ -29,18 +29,19 @@ internal sealed class HmiClassicKind : ISourceKind
     public string Section { get; }
     public DeviceFamily Family => DeviceFamily.HmiClassic;
     public string? FixedName => null;
-    public IReadOnlyList<string> Extensions { get; } = new[] { ".xml" };
+    public bool XmlNeedsCompile => false;
+    public IReadOnlyList<string> Formats { get; } = new[] { SourceFormat.Xml };
 
     public async Task<IReadOnlyList<ListedEntry>> List(TiaSession session, string hmi) =>
         (await session.ListHmiClassicObjectsAsync(hmi))
             .Where(o => o.Kind == _classicKind)
             .OrderBy(o => Label(o.FolderPath, o.Name), StringComparer.OrdinalIgnoreCase)
-            .Select(o => new ListedEntry(o.FolderPath, o.Name, Describe(Name, o.FolderPath, o.Name)))
+            .Select(o => new ListedEntry(o.FolderPath, o.Name, Describe(Name, o.FolderPath, o.Name), Formats))
             .ToList();
 
-    public async Task Export(TiaSession session, string hmi, Func<string, string, bool> include, List<ExportedItem> items)
+    public async Task Export(TiaSession session, string hmi, Func<string, string, IReadOnlyCollection<string>?> formats, List<ExportedItem> items)
     {
-        foreach (var o in await session.ReadHmiClassicObjectsAsync(hmi, (kind, folder, name) => kind == _classicKind && include(folder, name)))
+        foreach (var o in await session.ReadHmiClassicObjectsAsync(hmi, (kind, folder, name) => kind == _classicKind && formats(folder, name) != null))
         {
             var files = o.Xml == null
                 ? new List<(string, string, bool)>()

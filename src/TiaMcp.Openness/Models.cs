@@ -23,8 +23,6 @@ public sealed record TagTableSummary(string PlcName, string GroupPath, string Na
 
 public sealed record TypeSummary(string PlcName, string GroupPath, string Name);
 
-public sealed record TagTableResult(bool Success, IReadOnlyList<TagInfo> Tags, string? Error);
-
 public sealed record WriteTagsResult(bool Success, IReadOnlyList<string> Messages);
 
 public sealed record SimpleResult(bool Success, string? Error);

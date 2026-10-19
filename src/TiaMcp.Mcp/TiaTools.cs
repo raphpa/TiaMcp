@@ -414,7 +414,7 @@ public sealed partial class TiaTools
     });
 
     [McpServerTool(Name = "list_project")]
-    [Description(@"List what the connected project has, per PLC and HMI software ('=== name ===' - the plcName/hmiName other tools take): blocks with their language (INCONSISTENT: needs compile_plc, e.g. before a GRAPH or STL block can be read), UDTs, tag tables, empty tag table groups and alarm text lists; for WinCC Unified the HMI tag tables and alarm files, for classic WinCC the tag tables, text lists, screen templates, pop-up screens and screens. Fast: names only, no source - read_source_tree reads the source. Item lines are in _export_summary.txt's format and can be passed to read_source_tree's items as they are.
+    [Description(@"List what the connected project has, per PLC and HMI software ('=== name ===' - the plcName/hmiName other tools take): blocks with their language (INCONSISTENT: needs compile_plc, e.g. before a GRAPH or STL block can be read), UDTs, tag tables, empty tag table groups and alarm text lists; for WinCC Unified the HMI tag tables and alarm files, for classic WinCC the tag tables, text lists, screen templates, pop-up screens and screens. Fast: names only, no source - read_source_tree reads the source. Each item line ends with the formats it can be read in, its own first, e.g. ""tag table 'Tags' [csv, xml]"" (""xml"" is the raw Openness export). Item lines are in _export_summary.txt's format and can be passed to read_source_tree's items as they are.
 
 Without filter or deviceName, a project of more than 200 items only gets counts per software back; pass targetDirectory to write the full list to '<targetDirectory>/_project_list.txt'.")]
     public Task<string> ListProject(
@@ -442,7 +442,7 @@ Without filter or deviceName, a project of more than 200 items only gets counts 
             if (found == 0 && filter != null) continue;
 
             list.AppendLine(Header(family, device));
-            foreach (var entry in kinds.SelectMany(k => k.Entries)) list.AppendLine($"  {entry.Text}");
+            foreach (var entry in kinds.SelectMany(k => k.Entries)) list.AppendLine($"  {entry.Text}{FormatList(entry.Formats)}");
             list.AppendLine();
         }
 
@@ -489,10 +489,12 @@ Pass items to read only part of the project (much faster than a full read): e.g.
 
 Files per item: blocks and UDTs keep TIA Portal's own document format (.s7dcl, plus .s7res holding the comment/title texts its S7_MLC attributes refer to); a GRAPH block is '<name>.graph.il', a whole-block-STL block '<name>.awl' (TIA Portal's own 'Generate source' text). Read-only companions, never written back: '<name>.interface.txt' (an instance DB's resolved interface) and '<name>.stl-networks.awl'/'.xml' (the STL networks inside an otherwise FBD/LAD/SCL block; the .s7dcl keeps an empty placeholder NETWORK with S7_Language := ""STL"" at each one's position). Tag tables, alarms and alarm text lists (From, To, one Text [language] column per project language) are Excel-compatible CSV with a UTF-8 BOM.
 
-An item that fails to export (e.g. an inconsistent block - GRAPH blocks must be compiled first) is reported, and files from an earlier read of it are renamed with a '.stale' suffix rather than left looking current. '_export_summary.txt' lists every item in the tree; '_manifest.json' is write_source_tree's bookkeeping - don't edit it. Returns counts, failures, and for a partial read each item's files.")]
+Formats: blocks, UDTs and PLC tag tables can also be read as their raw Openness XML ('<name>.xml', SimaticML): complete where a converted format leaves something out, and writable too. An item is read in the formats it already has in the tree, else its own format; pass its list line with formats (""tag table 'Tags' [csv, xml]"", ""block 'Main' [xml]"") to choose. The XML costs no extra export where the own format is made from it (tag tables, GRAPH and code blocks); for data blocks, UDTs and whole-STL blocks it does. _manifest.json records each item's formats and each file's format.
+
+An item that fails to export (e.g. an inconsistent block - GRAPH blocks must be compiled first) is reported, and files from an earlier read of it are renamed with a '.stale' suffix rather than left looking current. '_export_summary.txt' lists every item in the tree, with the formats it has there (list_project shows the formats it can be read in); '_manifest.json' is write_source_tree's bookkeeping - don't edit it. Returns counts, failures, and for a partial read each item's files.")]
     public Task<string> ReadSourceTree(
         [Description("Root directory of the source tree. Created if it doesn't exist; keep using the same one for the project.")] string targetDirectory,
-        [Description("Optional: read only these items - 'Name', 'group/path/Name', 'group/path/' for everything below a group, or item lines as list_project shows them (case-insensitive; for HMI alarms 'DiscreteAlarms', 'AnalogAlarms', 'AlarmClasses' or 'HMI alarms/'). Omit to read everything.")] string[]? items = null,
+        [Description("Optional: read only these items - 'Name', 'group/path/Name', 'group/path/' for everything below a group, or item lines as list_project shows them, optionally ending with the formats to read, e.g. \"tag table 'Tags' [csv, xml]\" (case-insensitive; for HMI alarms 'DiscreteAlarms', 'AnalogAlarms', 'AlarmClasses' or 'HMI alarms/'). Omit to read everything.")] string[]? items = null,
         [Description("Optional: read only this PLC or HMI software name")] string? deviceName = null) => Safe(async () =>
     {
         if (!_session.IsConnected) return "Not connected. Call tia_connect first.";
@@ -517,7 +519,7 @@ An item that fails to export (e.g. an inconsistent block - GRAPH blocks must be 
         }
 
         var startedAt = DateTime.Now;
-        var (exported, devices) = await ExportItems(selection == null ? null : (_, kind, groupPath, name) => Selects(selection, kind, groupPath, name), deviceName);
+        var (exported, devices) = await ExportItems(selection == null ? null : (_, kind, groupPath, name) => RequestedFormats(selection, kind, groupPath, name), deviceName, previous);
         if (devices.Count == 0) return deviceName == null ? "No PLC or HMI devices found." : $"No PLC or HMI software named '{deviceName}'.";
 
         var manifest = previous ?? new SourceTreeManifest();
@@ -526,7 +528,7 @@ An item that fails to export (e.g. an inconsistent block - GRAPH blocks must be 
         // Items in the part that was read which the project doesn't have (any more).
         var gone = manifest.Items
             .Where(i => (deviceName == null || string.Equals(i.Device, deviceName, StringComparison.OrdinalIgnoreCase))
-                        && (selection == null || Selects(selection, i.Kind, i.GroupPath, i.Name))
+                        && (selection == null || RequestedFormats(selection, i.Kind, i.GroupPath, i.Name) != null)
                         && !exported.Any(e => i.Is(e.Device, e.Kind, e.Name)))
             .ToList();
         foreach (var item in gone) RemoveFromTree(targetDirectory, manifest, item);
@@ -552,9 +554,11 @@ An item that fails to export (e.g. an inconsistent block - GRAPH blocks must be 
     });
 
     [McpServerTool(Name = "write_source_tree")]
-    [Description(@"Write a source tree from read_source_tree back into the connected project: every item whose files were edited since the last read, and every new file - a new block, UDT or tag table is created by adding its file in the right folder (the folder gives the group, the file name the item's name; for a new block or UDT start from an existing file of the same kind). Written items are read back into the tree afterward, so their files show what TIA Portal made of them. Not compiled - call compile_plc afterward, and after an FB interface change read the instance DBs again. Deleting a file does not delete the item in the project (use the delete_* tools).
+    [Description(@"Write a source tree from read_source_tree back into the connected project: every item whose files were edited since the last read, and every new file - a new block, UDT or tag table is created by adding its file in the right folder (the folder gives the group, the file name the item's name; for a new block or UDT start from an existing file of the same kind). Written items are read back into the tree afterward, so their files show what TIA Portal made of them. Not compiled - call compile_plc afterward, and after an FB interface change read the instance DBs again - except that a PLC whose written items have an .xml in the tree is compiled before they are read back (an XML export needs a consistent object). Deleting a file does not delete the item in the project (use the delete_* tools).
 
 Refuses (FAILED, nothing written for that item) to overwrite an item that was changed in TIA Portal since it was read, or that exists in the project but was never read into the tree; force=true overwrites anyway. A tree read from another project (e.g. to restore it into an emptied copy) is written in full, without these checks. So is a tree without _manifest.json, such as one a generator script writes: everything its _export_summary.txt (or itemList) lists is written, and nothing is read back into it.
+
+An item in more than one format is written from the one format whose files were edited; an item edited in two formats is refused (FAILED) - only one can be written. All formats are read back afterward.
 
 Writing rules per file type:
 - SCL block: the '{ S7_EditorMode := ""SCL"" }' attribute block before FUNCTION/FUNCTION_BLOCK/DATA_BLOCK is required. FBD/LAD: never hand-write NETWORK/RUNG notation from scratch - copy a similar existing block's .s7dcl/.s7res and adapt it.
@@ -562,6 +566,7 @@ Writing rules per file type:
 - GRAPH ('.graph.il'): step/transition attributes, actions and conditions are writable, steps/transitions can be added or removed, and BRANCHES/CONNECTIONS of a SEQUENCE are rewritten when present; INTERFACE and PREOPERATIONS are read-only. A condition still containing a construct shown as generic 'PartName(args)' is refused. A new GRAPH block is made by cloning an existing GRAPH block of the PLC (picked automatically) and reshaping it. The write recompiles the block and reports errors.
 - Whole-block STL ('.awl'): AWL text as TIA Portal's 'Generate source' produces it, block name in the header unchanged. A block with embedded STL networks can't be written.
 - Instance DB: its .s7dcl ('DATA_BLOCK ""x"" ... : FB_y'); the FB must exist.
+- Raw XML ('<name>.xml' of a block, UDT or PLC tag table): SimaticML as read; replaces the whole object (a table's removed tags go too), or creates it - also GRAPH blocks and blocks with embedded STL networks. Its <Name> must match the file name.
 - PLC tag table CSV: Name, DataType, LogicalAddress, Comment, ExternalAccessible, ExternalVisible, ExternalWritable (True/False). Rows update or add tags; an empty cell leaves that value unchanged; removing a row deletes that tag (not when writing a tree read from another project). Renaming a tag in the CSV deletes it and makes a new one, breaking references - use rename_plc_tag.
 - HMI tag table CSV: Name, DataType, Address, Connection, PlcName, PlcTag, Comment, AcquisitionCycle. Bind to a PLC tag with Connection + PlcTag (dot-qualified for a DB member); DataType then follows from the PLC tag. PlcName is ignored on write. AcquisitionCycle (e.g. T1s) only on PLC-bound tags. Rows and removed rows as for PLC tag tables; rename with rename_hmi_tag.
 - PLC alarm text list CSV ('PLC alarm text lists/<list>.csv'): From, To, Text [language]... Only existing user lists (create a new list in TIA Portal). The write patches a fresh export of all lists and imports it, so other lists are untouched; a removed row deletes that entry (not when writing a tree read from another project); a language column left out stays unchanged. Every list's language must be a project language.
@@ -624,21 +629,26 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
         else if (!workingCopy)
             notes.Add($"The tree was read from project '{manifest.Project}', not the connected '{_session.ProjectName}': every listed item is written, and nothing is compared with or refreshed from this project.");
 
-        if (workingCopy && !all)
+        // The format each item is written from; unchanged items are left out unless all is set.
+        var toWrite = new List<ImportListItem>();
+        var refused = new List<(ImportListItem Item, string Reason)>();
+        var unchanged = 0;
+        foreach (var item in items)
         {
-            var changed = new List<ImportListItem>();
-            var unchanged = 0;
-            foreach (var item in items)
+            var entry = workingCopy ? manifest!.Find(item.DeviceName, item.Kind, item.ItemName) : null;
+            var (format, state, error) = WriteFormat(sourceDirectory, item, entry, workingCopy);
+            if (error != null) { refused.Add((item, error)); continue; }
+            if (state == DiskState.Deleted)
             {
-                var entry = manifest!.Find(item.DeviceName, item.Kind, item.ItemName);
-                var state = entry == null ? DiskState.Changed : CompareWithDisk(sourceDirectory, entry);
-                if (state == DiskState.Changed) changed.Add(item);
-                else if (state == DiskState.Unchanged) unchanged++;
-                else notes.Add($"{Describe(item.Kind, item.GroupPath, item.ItemName)}: its files were deleted from the tree. That doesn't delete it in the project - use the delete_* tool for that.");
+                notes.Add($"{Describe(item.Kind, item.GroupPath, item.ItemName)}: its files were deleted from the tree. That doesn't delete it in the project - use the delete_* tool for that.");
+                continue;
             }
-            if (unchanged > 0) notes.Add($"{unchanged} item(s) unchanged since read_source_tree were not written (all=true writes them anyway).");
-            items = changed;
+            if (state == DiskState.Unchanged && !all) { unchanged++; continue; }
+            item.Format = format;
+            toWrite.Add(item);
         }
+        if (unchanged > 0) notes.Add($"{unchanged} item(s) unchanged since read_source_tree were not written (all=true writes them anyway).");
+        items = toWrite;
 
         var projectDevices = await Devices(null);
         await _session.ClearHmiClassicScreenNumbersAsync();
@@ -649,6 +659,7 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
             conflicts = await FindConflicts(manifest!, items);
             items = items.Where(i => !conflicts.Any(c => c.Item == i)).ToList();
         }
+        conflicts.AddRange(refused);
 
         var startedAt = DateTime.Now;
         var summary = new StringBuilder();
@@ -692,6 +703,15 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
                 : $"{Describe(i.Kind, i.GroupPath, i.ItemName)}: a {i.Kind} can't be written to {(family == DeviceFamily.Plc ? "a PLC" : family == DeviceFamily.HmiClassic ? "a classic WinCC HMI" : "a WinCC Unified HMI")}"));
             logs.Add(unknown);
 
+            // See ISourceKind.XmlNeedsCompile.
+            if (workingCopy && written.Any(w => string.Equals(w.DeviceName, deviceName, StringComparison.OrdinalIgnoreCase)
+                    && kinds.Any(k => k.Name == w.Kind && k.XmlNeedsCompile)
+                    && (w.Format == SourceFormat.Xml || manifest!.Find(w.DeviceName, w.Kind, w.ItemName)?.WritableFiles.Any(f => f.Value.Format == SourceFormat.Xml) == true)))
+            {
+                var compile = await _session.CompileAsync(deviceName);
+                notes.Add($"Compiled '{deviceName}' so the written items can be read back as XML: {compile.State}, {compile.ErrorCount} error(s), {compile.WarningCount} warning(s).");
+            }
+
             foreach (var log in logs)
             {
                 foreach (var line in log.Created) summary.AppendLine($"  CREATED  {line}");
@@ -721,7 +741,7 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
         // new baseline, so the next write sees them as unchanged.
         if (workingCopy && written.Count > 0)
         {
-            var (exported, _) = await ExportItems((device, kind, _, name) => written.Any(w => w.Is(device, kind, name)), null);
+            var (exported, _) = await ExportItems((device, kind, _, name) => written.Any(w => w.Is(device, kind, name)) ? Array.Empty<string>() : null, null, manifest);
             WriteExport(sourceDirectory, manifest!, exported);
             manifest!.Save(sourceDirectory);
             File.WriteAllText(Path.Combine(sourceDirectory, "_export_summary.txt"), FormatSummary(sourceDirectory, manifest));
@@ -742,26 +762,57 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
 
     private enum DiskState { Unchanged, Changed, Deleted }
 
-    // Compares an item's files on disk with what read_source_tree last wrote for it. A writable
-    // file of the item that the read didn't produce (e.g. a .s7res added by hand) counts as a change.
-    private static DiskState CompareWithDisk(string root, SourceTreeItem entry)
+    // The format an item is written from, and whether it was edited since the last read. For an
+    // item of the working copy that the last read wrote (entry): the one format whose files were
+    // edited - an edit in two formats is refused, only one can be written - or, unedited, the first
+    // format it has in the tree. For anything else (a new file, a tree from another project or
+    // without manifest): the first format of the kind whose file is there - so its own format
+    // before the raw XML - except that a new item of the working copy in two formats is refused.
+    private static (string? Format, DiskState State, string? Error) WriteFormat(string root, ImportListItem item, SourceTreeItem? entry, bool workingCopy)
     {
-        var expected = entry.WritableFiles.ToList();
-        var present = expected.Where(f => File.Exists(Path.Combine(root, f.Key))).ToList();
-        if (expected.Count > 0 && present.Count == 0) return DiskState.Deleted;
-        if (present.Count < expected.Count) return DiskState.Changed;
-        if (present.Any(f => SourceTreeManifest.Hash(File.ReadAllText(Path.Combine(root, f.Key))) != f.Value)) return DiskState.Changed;
+        var kind = SourceKinds.Find(item.Kind)!;
+        var dir = ItemDir(item.DeviceName, item.Kind, item.GroupPath);
+        var stem = Sanitize(ItemStem(item.Kind, item.ItemName));
+        var present = kind.Formats.Where(f => File.Exists(Path.Combine(root, $"{dir}/{stem}{SourceFormat.Extension(f)}"))).ToList();
+        if (entry == null)
+        {
+            if (workingCopy && present.Count > 1)
+                return (null, DiskState.Changed, $"is new in the tree in more than one format ({string.Join(", ", present)}). Keep the file of one format only, and write again.");
+            return (present.FirstOrDefault(), DiskState.Changed, null);
+        }
 
-        var dir = ItemDir(entry.Device, entry.Kind, entry.GroupPath);
-        var stem = Sanitize(ItemStem(entry.Kind, entry.Name));
-        return SourceExtensions.Select(ext => $"{dir}/{stem}{ext}")
-            .Any(path => File.Exists(Path.Combine(root, path)) && !entry.Files.Keys.Contains(path, StringComparer.OrdinalIgnoreCase))
-            ? DiskState.Changed
-            : DiskState.Unchanged;
+        var edited = EditedFormats(root, entry, kind, dir, stem);
+        if (edited.Count > 1)
+            return (null, DiskState.Changed, $"was edited in more than one format ({string.Join(", ", edited)}), and only one can be written. Undo the edit in all but one of them, or read the item again to bring them in line.");
+        if (edited.Count == 1) return (edited[0], DiskState.Changed, null);
+        if (present.Count == 0 && entry.WritableFiles.Any()) return (null, DiskState.Deleted, null);
+        return (present.FirstOrDefault(), DiskState.Unchanged, null);
     }
 
-    // Every writable extension, including the .s7res that goes with a .s7dcl.
-    private static readonly string[] SourceExtensions = SourceKinds.All.SelectMany(k => k.Extensions).Append(".s7res").Distinct().ToArray();
+    // The formats of an item whose files on disk differ from what read_source_tree last wrote: a
+    // changed or deleted file of a format that still has files, or a file the read didn't produce
+    // (e.g. a .s7res added next to a .s7dcl, or an .xml next to a .csv). A format whose files were
+    // all deleted is not an edit.
+    private static List<string> EditedFormats(string root, SourceTreeItem entry, ISourceKind kind, string dir, string stem)
+    {
+        var edited = new List<string>();
+        foreach (var format in entry.WritableFiles.GroupBy(f => f.Value.Format))
+        {
+            var present = format.Where(f => File.Exists(Path.Combine(root, f.Key))).ToList();
+            if (present.Count == 0) continue;
+            if (present.Count < format.Count() || present.Any(f => SourceTreeManifest.Hash(File.ReadAllText(Path.Combine(root, f.Key))) != f.Value.Hash))
+                edited.Add(format.Key);
+        }
+
+        foreach (var format in kind.Formats.Where(f => !edited.Contains(f)))
+        {
+            var files = new List<string> { $"{dir}/{stem}{SourceFormat.Extension(format)}" };
+            if (format == SourceFormat.S7dcl) files.Add($"{dir}/{stem}.s7res");
+            if (files.Any(path => File.Exists(Path.Combine(root, path)) && !entry.Files.Keys.Contains(path, StringComparer.OrdinalIgnoreCase)))
+                edited.Add(format);
+        }
+        return edited;
+    }
 
     // Source files in the tree that no read put there: new items to create. Kind and group path
     // follow from the folder (see ItemDir), the name from the file name.
@@ -782,7 +833,7 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
                 foreach (var file in Directory.GetFiles(sectionDir, "*", SearchOption.AllDirectories))
                 {
                     var fileName = Path.GetFileName(file);
-                    var ext = kind.Extensions.FirstOrDefault(e => fileName.EndsWith(e, StringComparison.OrdinalIgnoreCase));
+                    var ext = kind.Formats.Select(SourceFormat.Extension).FirstOrDefault(e => fileName.EndsWith(e, StringComparison.OrdinalIgnoreCase));
                     if (ext == null || SourceTreeManifest.IsReadOnlyCompanion(fileName)) continue;
 
                     var stem = fileName.Substring(0, fileName.Length - ext.Length);
@@ -803,7 +854,7 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
     // the project. Writing them would discard what was done in TIA Portal.
     private async Task<List<(ImportListItem Item, string Reason)>> FindConflicts(SourceTreeManifest manifest, List<ImportListItem> items)
     {
-        var (current, _) = await ExportItems((device, kind, _, name) => items.Any(i => i.Is(device, kind, name)), null);
+        var (current, _) = await ExportItems((device, kind, _, name) => items.Any(i => i.Is(device, kind, name)) ? Array.Empty<string>() : null, null, manifest);
         var conflicts = new List<(ImportListItem, string)>();
         foreach (var exported in current.Where(e => e.Ok))
         {
@@ -818,7 +869,7 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
             var now = exported.Files.Where(f => !SourceTreeManifest.IsReadOnlyCompanion(f.Path))
                 .ToDictionary(f => f.Path, f => SourceTreeManifest.Hash(f.Content), StringComparer.OrdinalIgnoreCase);
             var then = entry.WritableFiles.ToList();
-            if (now.Count != then.Count || then.Any(f => !now.TryGetValue(f.Key, out var hash) || hash != f.Value))
+            if (now.Count != then.Count || then.Any(f => !now.TryGetValue(f.Key, out var hash) || hash != f.Value.Hash))
                 conflicts.Add((item, "changed in TIA Portal since read_source_tree. Read it again (read_source_tree with items; this overwrites the file, so keep a copy of your edit), merge, and write again - or pass force=true to overwrite the project's version."));
         }
         return conflicts;
@@ -868,7 +919,10 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
     // Exports every item include (device, kind, group path, name) selects - all of them when it's
     // null - from every PLC and HMI, or only deviceName's. Also returns the devices it went
     // through, so a caller can tell which manifest items it would have seen if they still existed.
-    private async Task<(List<ExportedItem> Items, List<string> Devices)> ExportItems(Func<string, string, string, string, bool>? include, string? deviceName)
+    // formats (device, kind, group path, name) returns null to skip an item, or the formats to
+    // read it in; an empty list (and no formats function) means the formats the tree already has
+    // it in (manifest), else its own format. Formats a kind doesn't have are left out.
+    private async Task<(List<ExportedItem> Items, List<string> Devices)> ExportItems(Func<string, string, string, string, IReadOnlyCollection<string>?>? formats, string? deviceName, SourceTreeManifest? manifest)
     {
         var items = new List<ExportedItem>();
         var devices = await Devices(deviceName);
@@ -876,9 +930,19 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
         foreach (var (family, device) in devices)
         {
             foreach (var kind in SourceKinds.Of(family))
-                await kind.Export(_session, device, (g, n) => include == null || include(device, kind.Name, g, n), items);
+            {
+                IReadOnlyCollection<string>? Formats(string groupPath, string name)
+                {
+                    var requested = formats == null ? Array.Empty<string>() : formats(device, kind.Name, groupPath, name);
+                    if (requested == null) return null;
+                    if (requested.Count == 0)
+                        requested = manifest?.Find(device, kind.Name, name)?.WritableFiles.Select(f => f.Value.Format).Distinct().ToList() ?? new List<string>();
+                    return requested.Where(kind.Formats.Contains).ToList();
+                }
+                await kind.Export(_session, device, Formats, items);
+            }
 
-            if (family == DeviceFamily.HmiClassic && include == null)
+            if (family == DeviceFamily.HmiClassic && formats == null)
             {
                 var graphicLists = await _session.CountHmiClassicGraphicListsAsync(device);
                 if (graphicLists > 0)
@@ -898,11 +962,12 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
             var dir = Path.Combine(root, ItemDir(item.Device, item.Kind, item.GroupPath));
             var stem = ItemStem(item.Kind, item.Name);
             var previous = manifest.Find(item.Device, item.Kind, item.Name);
-            var entry = new SourceTreeItem { Device = item.Device, Kind = item.Kind, GroupPath = item.GroupPath, Name = item.Name };
+            var entry = new SourceTreeItem { Device = item.Device, Kind = item.Kind, GroupPath = item.GroupPath, Name = item.Name, Formats = item.Formats.ToList() };
             if (!item.Ok)
             {
                 entry.Ok = false;
                 entry.Error = item.Error;
+                entry.Formats = previous?.Formats ?? new List<string>();
                 entry.Stale = MarkStale(dir, stem);
                 manifest.Set(entry);
                 continue;
@@ -921,7 +986,7 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
             foreach (var file in item.Files)
             {
                 File.WriteAllText(Path.Combine(root, file.Path), file.Content, new UTF8Encoding(file.Bom));
-                entry.Files[file.Path] = SourceTreeManifest.Hash(file.Content);
+                entry.Files[file.Path] = new SourceTreeFile { Hash = SourceTreeManifest.Hash(file.Content), Format = SourceTreeManifest.FormatOf(file.Path) };
             }
             manifest.Set(entry);
         }
@@ -955,7 +1020,7 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
             summary.AppendLine(device.All(i => i.Kind.StartsWith("HMI")) ? $"=== {device.Key} (HMI) ===" : $"=== {device.Key} ===");
             foreach (var item in device.OrderBy(i => SourceKinds.ListIndex(i.Kind)).ThenBy(i => Label(i.GroupPath, i.Name), StringComparer.OrdinalIgnoreCase))
             {
-                if (item.Ok) { summary.AppendLine($"  OK     {Describe(item.Kind, item.GroupPath, item.Name)}"); continue; }
+                if (item.Ok) { summary.AppendLine($"  OK     {Describe(item.Kind, item.GroupPath, item.Name)}{FormatList(item.Files.Values.Select(f => f.Format).Distinct().ToList())}"); continue; }
                 summary.AppendLine($"  FAILED {Describe(item.Kind, item.GroupPath, item.Name)}: {item.Error}");
                 if (item.Stale) summary.AppendLine($"  STALE  {Describe(item.Kind, item.GroupPath, item.Name)} - previous export left on disk with a '.stale' suffix, does not reflect current state");
             }
@@ -967,17 +1032,19 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
     }
 
     // read_source_tree's items: 'Name', 'group/path/Name', or 'group/path/' for everything below a
-    // group, case-insensitive. HMI alarms are 'DiscreteAlarms', 'AnalogAlarms', 'AlarmClasses', or
-    // 'HMI alarms/' for all three. A line as list_project or _export_summary.txt shows an item
-    // ("block 'group/Name' [SCL]", "OK     udt 'Name'", "HMI DiscreteAlarms") selects that item.
-    private static bool Selects(IReadOnlyList<string> selection, string kind, string groupPath, string name)
+    // group, case-insensitive. A fixed-file kind (the HMI alarm files) is selected by its file name
+    // ('DiscreteAlarms') or its section ('HMI alarms/'). A line as list_project or
+    // _export_summary.txt shows an item ("block 'group/Name' [SCL] [s7dcl, xml]", "OK     udt
+    // 'Name'", "HMI DiscreteAlarms") selects that item, in the formats at its end if any. Returns
+    // null when the item isn't selected, else the requested formats - empty for the default.
+    private static IReadOnlyCollection<string>? RequestedFormats(IReadOnlyList<string> selection, string kind, string groupPath, string name)
     {
         foreach (var raw in selection)
         {
             var line = SourceKinds.ListedItem.Match(raw.Trim());
             if (line.Success && line.Groups["kind"].Value == kind
                 && (SourceKinds.IsFixed(kind) || string.Equals(line.Groups["label"].Value, Label(groupPath, name), StringComparison.OrdinalIgnoreCase)))
-                return true;
+                return FormatsInLine(raw);
         }
 
         if (SourceKinds.IsFixed(kind)) (groupPath, name) = (SectionOf(kind), ItemStem(kind, name));
@@ -989,15 +1056,31 @@ Writes '<sourceDirectory>/_import_report.txt' with one CREATED/UPDATED/SKIPPED/F
             if (entry.EndsWith("/"))
             {
                 var group = entry.TrimEnd('/');
-                if (string.Equals(groupPath, group, StringComparison.OrdinalIgnoreCase) || groupPath.StartsWith(group + "/", StringComparison.OrdinalIgnoreCase)) return true;
+                if (string.Equals(groupPath, group, StringComparison.OrdinalIgnoreCase) || groupPath.StartsWith(group + "/", StringComparison.OrdinalIgnoreCase)) return Array.Empty<string>();
             }
             else if (string.Equals(entry, entry.Contains("/") ? label : name, StringComparison.OrdinalIgnoreCase))
             {
-                return true;
+                return Array.Empty<string>();
             }
         }
-        return false;
+        return null;
     }
+
+    // The formats of an item line: its last bracket that holds only format names, e.g. the
+    // '[csv, xml]' in "tag table 'Tags' [csv, xml]" - not the '[SCL]' of a block.
+    private static IReadOnlyCollection<string> FormatsInLine(string line)
+    {
+        foreach (Match bracket in Regex.Matches(line, @"\[([^\]]*)\]").Cast<Match>().Reverse())
+        {
+            var names = bracket.Groups[1].Value.Split(',').Select(f => f.Trim().ToLowerInvariant()).ToList();
+            if (names.All(SourceFormat.All.Contains)) return names;
+        }
+        return Array.Empty<string>();
+    }
+
+    // ' [csv, xml]' after an item line, or nothing for a line without formats.
+    private static string FormatList(IReadOnlyCollection<string> formats) =>
+        formats.Count == 0 ? "" : $" [{string.Join(", ", formats)}]";
 
     // Renames leftover files from a previous successful export of this item to "<name>.stale" so
     // a failed re-export (e.g. the block went inconsistent) can't leave a same-named file on disk
